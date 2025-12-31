@@ -72,8 +72,42 @@ class LLMSettings(ModelSettings):
 class GeminiSettings(BaseModel):
     """Settings for Gemini API (temporary)."""
     api_key: Optional[str] = None
-    model_name: str = "gemini-3-pro"
+    model_name: str = "gemini-2.0-flash-exp"
     timeout_seconds: int = 15
+    min_refinement_length_ratio: float = 0.3
+    default_refinement_score: float = 0.7
+    refinement_prompt_template: str = Field(
+        default="""You are an expert in Algerian Darija and Telecom industry terminology (Ooredoo).
+
+Refine this transcript of a call between a subscriber and a customer service agent.
+
+GUIDELINES:
+
+1. Preserve the natural Algerian mix of Arabic and French (e.g., 'flexy', 'forfait', 'réseau', 'puce', 'crédit').
+
+2. Identify and format speakers as [Agent] and [Subscriber] based on context.
+
+3. Fix 'Whisper hallucinations' (repetitive loops or phonetic gibberish).
+
+4. Add punctuation (commas, question marks) to reflect the flow of a real conversation.
+
+5. Correct technical terms misheard by the ASR (e.g., 'débit' instead of 'debi').
+
+6. Do not translate to Modern Standard Arabic; keep it in refined Darija.
+
+Output MUST be a valid JSON object with the following keys:
+
+- "refined_text": The complete refined transcript.
+
+- "score": A quality score between 0.0 and 1.0 representing transcript coherence and meaning.
+
+Original transcript:
+
+{transcript}
+
+JSON Output:""",
+        description="Template for refinement prompt. Use {transcript} as placeholder."
+    )
 
 
 class ClassificationSettings(BaseModel):
@@ -138,7 +172,7 @@ class Settings(BaseModel):
             ),
             gemini=GeminiSettings(
                 api_key=gemini_key,
-                model_name="gemini-3-pro"
+                model_name="gemini-2.0-flash-exp"
             ),
             qwen=LLMSettings(
                 model_path="Qwen/Qwen-7B-Chat",
