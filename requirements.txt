@@ -1,0 +1,44 @@
+--extra-index-url https://download.pytorch.org/whl/cu130
+# --- Call Center Agentic Core Framework (Loose Dependencies) ---
+# NOTE: These are the core packages specific to the agent flow that were NOT pinned by the model.
+langgraph>=0.2.0
+langchain>=0.1.0
+langchain-core>=0.1.0
+
+# --- Pinned Model & Utilities (Specific Versions for Stability) ---
+# These specific versions override any looser requirements from the agentic framework.
+pydantic==2.12.5
+torch==2.9.1+cu130
+torchaudio==2.9.1
+torchvision==0.24.1+cu130
+triton==3.5.1
+numpy==2.3.3
+scipy==1.16.3
+accelerate==1.12.0
+datasets==4.4.1
+huggingface-hub==0.36.0
+openai-whisper==20250625
+peft==0.18.0
+safetensors==0.7.0
+tiktoken==0.12.0
+tokenizers==0.22.1
+transformers==4.57.3
+audioread==3.1.0
+decorator==5.2.1
+filelock==3.19.1
+joblib==1.5.2
+librosa==0.11.0
+packaging==25.0
+platformdirs==4.5.0
+pyarrow==22.0.0
+pytz==2025.2
+PyYAML==6.0.3
+requests==2.32.5
+soundfile==0.13.1
+soxr==1.0.0
+tqdm==4.67.1
+typing_extensions==4.15.0
+urllib3==2.5.0
+einops
+transformers_stream_generator
+google-generativeai
