@@ -31,9 +31,17 @@ class RefinementService(BaseService):
                 os.environ["GOOGLE_API_KEY"] = self.settings.api_key
                 self._api_configured = True
                 
-                # Create and cache client using new google.genai API
-                from google import genai
-                self._client = genai.Client()
+                # Create and cache client using google.genai API
+                try:
+                    # Try new API first (google-genai package)
+                    from google import genai
+                    self._client = genai.Client()
+                except ImportError:
+                    # Fallback: The new API might not be available, use old API temporarily
+                    import google.generativeai as genai_old
+                    genai_old.configure(api_key=self.settings.api_key)
+                    self._client = genai_old
+                    self.logger.warning("Using deprecated google.generativeai API. Please install google-genai package for new API.")
                 
                 self.logger.info(f"✅ Gemini API configured with model: {self.settings.model_name}")
             except Exception as e:
@@ -65,8 +73,13 @@ class RefinementService(BaseService):
             try:
                 # Use cached client (created during initialization)
                 if self._client is None:
-                    from google import genai
-                    self._client = genai.Client()
+                    try:
+                        from google import genai
+                        self._client = genai.Client()
+                    except ImportError:
+                        import google.generativeai as genai_old
+                        genai_old.configure(api_key=self.settings.api_key)
+                        self._client = genai_old
                 
                 # Create refinement prompt from config template
                 prompt = self.settings.refinement_prompt_template.format(transcript=transcript)
@@ -74,12 +87,25 @@ class RefinementService(BaseService):
                 # Use model from config (gemini-2.0-flash-exp)
                 model_name = self.settings.model_name
                 
-                # Use new google.genai API with JSON response format
-                response = self._client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config={'response_mime_type': 'application/json'}
-                )
+                # Check which API we're using and call accordingly
+                if hasattr(self._client, 'models') and hasattr(self._client.models, 'generate_content'):
+                    # New API: google.genai
+                    response = self._client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config={'response_mime_type': 'application/json'}
+                    )
+                elif hasattr(self._client, 'GenerativeModel'):
+                    # Old API: google.generativeai
+                    model = self._client.GenerativeModel(model_name)
+                    response = model.generate_content(
+                        prompt,
+                        generation_config={
+                            "response_mime_type": "application/json"
+                        }
+                    )
+                else:
+                    raise Exception("Unknown API structure")
                 
                 # Extract JSON from response
                 raw_text = ""

@@ -42,3 +42,4 @@ urllib3==2.5.0
 einops
 transformers_stream_generator
 google-generativeai
+google-genai
