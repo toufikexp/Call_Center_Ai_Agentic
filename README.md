@@ -6,7 +6,7 @@ A production-ready, on-premise service-oriented pipeline for call center audio a
 
 This solution implements a complete LangGraph-based pipeline that:
 - Transcribes audio using fine-tuned Whisper models 
-- Refines transcripts using Gemini API (temporary solution)
+- Refines transcripts using Gemini API (`gemini-2.0-flash-exp`) with quality scoring (temporary solution)
 - Performs quality assurance with conditional loops
 - Corrects low-confidence transcriptions using local LLMs (Qwen)
 - Classifies call subjects using DziriBERT
@@ -52,6 +52,8 @@ src/
 ├── main.py                  # Entry point
 ├── requirements.txt         # Python dependencies
 ├── README.md                # This file
+├── .gitignore               # Git ignore rules (excludes venv, cache, models, data)
+├── .env                     # Environment variables (optional, not tracked in git)
 │
 ├── src/                     # Main source code
 │   ├── __init__.py
@@ -73,10 +75,12 @@ src/
 │       ├── __init__.py
 │       └── orchestrator.py
 │
-└── data/                    # Data directory
+└── data/                    # Data directory (excluded from git)
     ├── results/             # Output directory (auto-created)
     └── logs/                 # Logs directory (auto-created)
 ```
+
+**Note**: The `.gitignore` file excludes virtual environments (`cc_agentic_env/`), Python cache files (`__pycache__/`, `*.pyc`), model files, and data directories to keep the repository lightweight.
 
 ## 🚀 Usage
 
@@ -88,10 +92,23 @@ python main.py <audio_path>
 
 ### With Gemini API Key
 
+You can provide the Gemini API key in two ways:
+
+**Option 1: Environment Variable**
 ```bash
 # Linux/Mac
 export GEMINI_API_KEY="your-api-key-here"
 python main.py ./data/audio_files/sample_call.mp3
+```
+
+**Option 2: .env File (Recommended)**
+Create a `.env` file in the project root:
+```bash
+# .env
+GEMINI_API_KEY=your-api-key-here
+```
+
+The pipeline will automatically load the API key from the `.env` file if present.
 
 ### Programmatic Usage
 
@@ -118,7 +135,12 @@ Configuration is managed through `src/core/config.py` using Pydantic models:
 ### Model Settings
 
 - **WhisperSettings**: Transcription model configuration
+  - Default model path: Local path to fine-tuned Whisper model (configured in `config.py`)
+  - Supports custom model paths for on-premise deployment
 - **GeminiSettings**: Gemini API configuration (temporary)
+  - Model used: `gemini-2.0-flash-exp` (for transcript refinement)
+  - Default in config: `gemini-3-pro` (note: refinement service uses `gemini-2.0-flash-exp`)
+  - API key can be set via environment variable or `.env` file
 - **LLMSettings**: Local LLM configuration (Qwen)
 - **ModelSettings**: Base settings for DziriBERT models
 
@@ -165,6 +187,7 @@ Results are saved as JSON files in `data/results/`:
   "call_id": "call_audio_abc123",
   "transcript": "...",
   "refined_transcript": "...",
+  "refinement_score": 0.85,
   "confidence_score": 0.95,
   "is_corrected": false,
   "subject": "COMPLAINT",
@@ -175,6 +198,8 @@ Results are saved as JSON files in `data/results/`:
   "run_count": 1
 }
 ```
+
+**Note**: The `refinement_score` field (0.0-1.0) indicates the quality and coherence of the refined transcript, as assessed by the Gemini refinement service.
 
 ## 🎨 Service Architecture
 
@@ -240,12 +265,19 @@ pip install -r requirements.txt
 ```
 
 **Key Dependencies:**
-- LangGraph for workflow orchestration
-- Transformers for model loading
-- PyTorch for model execution
-- Librosa for audio processing
-- Pydantic for configuration
-- Google Generative AI (for Gemini API - temporary)
+- **LangGraph** (>=0.2.0) - Workflow orchestration
+- **LangChain** (>=0.1.0) - LLM framework integration
+- **Transformers** (4.57.3) - Model loading and inference
+- **PyTorch** (2.9.1+cu130) - Deep learning framework with CUDA support
+- **OpenAI Whisper** (20250625) - Audio transcription
+- **Librosa** (0.11.0) - Audio processing
+- **Pydantic** (2.12.5) - Configuration and data validation
+- **Google Generative AI** - Gemini API client (for transcript refinement)
+- **Hugging Face Hub** (0.36.0) - Model repository access
+- **Accelerate** (1.12.0) - Model optimization
+- **Datasets** (4.4.1) - Data handling utilities
+
+**Note**: The project uses CUDA-enabled PyTorch builds. For CPU-only systems, install the CPU version of PyTorch instead.
 
 ## 🛡️ Compliance & Security
 
