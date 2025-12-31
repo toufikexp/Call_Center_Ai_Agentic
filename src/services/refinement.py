@@ -31,16 +31,9 @@ class RefinementService(BaseService):
                 os.environ["GOOGLE_API_KEY"] = self.settings.api_key
                 self._api_configured = True
                 
-                # Create and cache client
-                try:
-                    # Try new API first
-                    from google import genai
-                    self._client = genai.Client()
-                except ImportError:
-                    # Fallback to old API
-                    import google.generativeai as genai
-                    genai.configure(api_key=self.settings.api_key)
-                    self._client = genai
+                # Create and cache client using new google.genai API
+                from google import genai
+                self._client = genai.Client()
                 
                 # Cache available model (only once during initialization)
                 self._cached_model = self._find_available_model()
@@ -56,44 +49,25 @@ class RefinementService(BaseService):
         if self._client is None:
             return None
         
-        # For old API (google.generativeai), we can't list models easily
-        # Just return None and we'll try models in order during processing
-        if hasattr(self._client, 'models') and hasattr(self._client.models, 'list'):
-            try:
-                # New API - list available models
-                models = self._client.models.list()
-                available_models = [m.name for m in models if hasattr(m, 'name')]
-                self.logger.info(f"Found {len(available_models)} available Gemini models")
-                if available_models:
-                    self.logger.info(f"Available models (first 10): {available_models[:10]}")
-                
-                # Look for common model names in available models
-                preferred_names = [
-                    "gemini-2.0-flash-exp",
-                    "gemini-1.5-pro",
-                    "gemini-1.5-flash",
-                    "gemini-pro",
-                    "models/gemini-2.0-flash-exp",
-                    "models/gemini-1.5-pro",
-                    "models/gemini-1.5-flash",
-                    "models/gemini-pro"
-                ]
-                
-                for pref_name in preferred_names:
-                    # Check if model name or full path matches
-                    for avail in available_models:
-                        if pref_name in avail or avail.endswith(pref_name.replace("models/", "")):
-                            self.logger.info(f"Cached model: {avail}")
-                            return avail
-                
-                # If no preferred model found, use first available
-                if available_models:
-                    self.logger.info(f"Using first available model: {available_models[0]}")
-                    return available_models[0]
-            except Exception as e:
-                self.logger.warning(f"Could not list models: {e}. Will try default model names.")
-        
-        return None
+        try:
+            # List available models using new API
+            models = self._client.models.list()
+            available_models = [m.name for m in models if hasattr(m, 'name')]
+            self.logger.info(f"Found {len(available_models)} available Gemini models")
+            
+            # Look for gemini-2.0-flash-exp (preferred model)
+            preferred_name = "gemini-2.0-flash-exp"
+            for avail in available_models:
+                if preferred_name in avail or avail.endswith(preferred_name):
+                    self.logger.info(f"Cached model: {avail}")
+                    return avail
+            
+            # If not found, log warning and return None (will use default in process)
+            self.logger.warning(f"Preferred model {preferred_name} not found in available models")
+            return None
+        except Exception as e:
+            self.logger.warning(f"Could not list models: {e}. Will use default model name.")
+            return None
     
     def process(self, transcript: str) -> ServiceResult:
         """
@@ -118,13 +92,8 @@ class RefinementService(BaseService):
             try:
                 # Use cached client (created during initialization)
                 if self._client is None:
-                    try:
-                        from google import genai
-                        self._client = genai.Client()
-                    except ImportError:
-                        import google.generativeai as genai
-                        genai.configure(api_key=self.settings.api_key)
-                        self._client = genai
+                    from google import genai
+                    self._client = genai.Client()
                 
                 # Create refinement prompt
                 prompt = f"""You are a text refinement expert for Algerian Arabic (Darija) call center transcripts.
@@ -142,65 +111,32 @@ Original transcript:
 
 Refined transcript:"""
                 
-                # Use cached model if available, otherwise try fallbacks
-                model_names = []
+                # Use gemini-2.0-flash-exp model (single model, no iteration)
+                model_name = "gemini-2.0-flash-exp"
                 
-                # First, try cached model from initialization
+                # Try with cached model first if available
                 if self._cached_model:
-                    model_names.append(self._cached_model)
+                    model_name = self._cached_model
                 
-                # Add the configured model name if not already in list
-                if self.settings.model_name and self.settings.model_name not in model_names:
-                    model_names.insert(0, self.settings.model_name)
-                
-                # Add fallback model names (try with and without "models/" prefix)
-                fallback_names = [
-                    "gemini-2.0-flash-exp",
-                    "gemini-1.5-pro",
-                    "gemini-1.5-flash",
-                    "models/gemini-2.0-flash-exp",
-                    "models/gemini-1.5-pro",
-                    "models/gemini-1.5-flash"
-                ]
-                
-                for name in fallback_names:
-                    if name not in model_names:
-                        model_names.append(name)
-                
-                response = None
-                last_error = None
-                
-                for model_name in model_names:
-                    try:
-                        # Check if using old API (google.generativeai) or new API
-                        if hasattr(self._client, 'GenerativeModel'):
-                            # Old API: google.generativeai
-                            # Remove "models/" prefix if present for old API
-                            clean_model_name = model_name.replace("models/", "")
-                            model = self._client.GenerativeModel(clean_model_name)
-                            response = model.generate_content(prompt)
-                        elif hasattr(self._client, 'models') and hasattr(self._client.models, 'generate_content'):
-                            # New API: google.genai
+                try:
+                    # Use new google.genai API
+                    response = self._client.models.generate_content(
+                        model=model_name,
+                        contents=prompt
+                    )
+                except Exception as e:
+                    # If cached model fails, try default model name
+                    if model_name != "gemini-2.0-flash-exp":
+                        try:
+                            self.logger.warning(f"Cached model {model_name} failed, trying default: gemini-2.0-flash-exp")
                             response = self._client.models.generate_content(
-                                model=model_name,
+                                model="gemini-2.0-flash-exp",
                                 contents=prompt
                             )
-                        else:
-                            raise Exception("Unknown API structure")
-                        
-                        if model_name != self.settings.model_name and model_name != self._cached_model:
-                            self.logger.info(f"Using {model_name} instead of {self.settings.model_name}")
-                        break
-                    except Exception as e:
-                        last_error = e
-                        error_msg = str(e)
-                        # Only log detailed errors for first few attempts to avoid spam
-                        if len([m for m in model_names if model_names.index(m) < model_names.index(model_name)]) < 3:
-                            self.logger.warning(f"Model {model_name} failed: {error_msg[:200]}")
-                        continue
-                
-                if response is None:
-                    raise Exception(f"Could not load any Gemini model. Last error: {last_error}")
+                        except Exception as e2:
+                            raise Exception(f"Failed to use Gemini model: {e2}")
+                    else:
+                        raise Exception(f"Failed to use Gemini model {model_name}: {e}")
                 
                 # Extract text from response
                 # The new API response structure: check for text attribute or direct string
