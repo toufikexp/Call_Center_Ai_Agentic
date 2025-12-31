@@ -1,3 +1,15 @@
 cc_agentic_env/
 __pycache__/
 *.pyc
+
+# Data directories (keep structure, exclude contents)
+data/audio_files/*
+!data/audio_files/.gitkeep
+data/logs/*
+!data/logs/.gitkeep
+data/results/*
+!data/results/.gitkeep
+
+# Model directories (keep structure, exclude contents)
+models/*
+!models/.gitkeep
