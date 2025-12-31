@@ -139,7 +139,7 @@ Configuration is managed through `src/core/config.py` using Pydantic models:
   - Supports custom model paths for on-premise deployment
 - **GeminiSettings**: Gemini API configuration (temporary)
   - Model used: `gemini-2.0-flash-exp` (for transcript refinement)
-  - Default in config: `gemini-3-pro` (note: refinement service uses `gemini-2.0-flash-exp`)
+  - Default in config: `gemini-2.0-flash-exp`
   - API key can be set via environment variable or `.env` file
 - **LLMSettings**: Local LLM configuration (Qwen)
 - **ModelSettings**: Base settings for DziriBERT models

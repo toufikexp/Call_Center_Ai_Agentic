@@ -34,7 +34,7 @@ def main():
     settings = get_settings()
     if gemini_key:
         settings.gemini.api_key = gemini_key
-        settings.gemini.model_name = "gemini-3-pro"
+        # Model name is set in config.py (default: gemini-2.0-flash-exp)
         print("[INFO] Gemini API key configured for transcript refinement")
     else:
         print("[WARNING] Gemini API key not set. Refinement step will be skipped.")

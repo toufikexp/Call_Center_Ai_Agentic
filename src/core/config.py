@@ -160,7 +160,7 @@ class Settings(BaseModel):
         
         return cls(
             whisper=WhisperSettings(
-            model_path="/home/zerrougt/Call_Center_Ai_Agentic/models/whisper_dz_asr",
+            model_path="/home/zerrougt/Call_Center_Ai_Agentic/models/whisper_dz_asr_large_chk750",
                 # model_path="microsoft/Phi-4-multimodal-instruct",
                 max_length=448,
                 max_new_tokens=444,  # Reduced to account for decoder input IDs

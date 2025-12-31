@@ -41,5 +41,4 @@ typing_extensions==4.15.0
 urllib3==2.5.0
 einops
 transformers_stream_generator
-google-generativeai
 google-genai
