@@ -1,178 +1,269 @@
 """
-Classification service using DziriBERT.
+Classification service using local vLLM API (Qwen3-4B).
 """
-import torch
-from typing import Tuple
-from transformers import AutoTokenizer, AutoModelForSequenceClassification
+import json
+import re
+from typing import Optional
+from openai import OpenAI
 
 from src.core.base import BaseService, ServiceResult
-from src.core.config import get_settings, ModelSettings, ClassificationSettings
+from src.core.config import get_settings, ClassificationSettings, VLLMSettings
 
 
 class ClassificationService(BaseService):
-    """Service for classifying call subjects."""
+    """Service for classifying call subjects using local vLLM API (Qwen3-4B)."""
     
     def __init__(
         self,
-        model_settings: ModelSettings = None,
+        vllm_settings: VLLMSettings = None,
         classification_settings: ClassificationSettings = None
     ):
         super().__init__("classification")
-        self.model_settings = model_settings or get_settings().dziribert_classifier
+        self.vllm_settings = vllm_settings or get_settings().vllm
         self.classification_settings = classification_settings or get_settings().classification
-        self._tokenizer = None
-        self._model = None
-        self._device = None
-    
-    def _get_device(self) -> str:
-        """Determine device to use."""
-        if self.model_settings.device == "auto":
-            return "cuda" if torch.cuda.is_available() else "cpu"
-        return self.model_settings.device
+        self._api_configured = False
+        self._client: Optional[OpenAI] = None
     
     def initialize(self) -> None:
-        """Load classification model."""
+        """Initialize the OpenAI Client for vLLM API."""
         if self._initialized:
             return
         
-        self.logger.info(f"Loading classification model: {self.model_settings.model_path}")
+        try:
+            # Initialize the OpenAI Client for vLLM
+            self._client = OpenAI(
+                base_url=self.vllm_settings.base_url,
+                api_key=self.vllm_settings.api_key  # vLLM doesn't require a key by default
+            )
+            self._api_configured = True
+            self.logger.info(f"✅ vLLM API configured for classification with model: {self.vllm_settings.model_name} at {self.vllm_settings.base_url}")
+        except Exception as e:
+            self.logger.error(f"Failed to configure vLLM API: {e}")
+            self.logger.warning("Classification will be skipped if API is unavailable.")
         
-        self._tokenizer = AutoTokenizer.from_pretrained(self.model_settings.model_path)
-        self._model = AutoModelForSequenceClassification.from_pretrained(
-            self.model_settings.model_path
-        )
-        
-        self._device = self._get_device()
-        self._model.eval()
-        if self._device == "cuda":
-            self._model = self._model.to(self._device)
-        
-        self.logger.info(f"✅ Classification model loaded on: {self._device.upper()}")
         self._initialized = True
+    
+    def _build_classification_prompt(self, transcript: str) -> str:
+        """Build classification prompt with predefined categories and sub-categories from config."""
+        categories = self.classification_settings.primary_categories
+        
+        # Reorder categories to put OTHER first (to emphasize it as default)
+        other_cat = self.classification_settings.other_category_name
+        if other_cat in categories:
+            categories = [other_cat] + [c for c in categories if c != other_cat]
+        
+        # Build category mapping with descriptions and sub-categories
+        category_mapping = []
+        for category in categories:
+            # Get description if available
+            description = self.classification_settings.category_descriptions.get(category, "")
+            
+            # Get sub-categories if available
+            subcategories = self.classification_settings.category_subcategories.get(category, [])
+            
+            # Build category entry
+            cat_entry = f"• {category}"
+            if description:
+                cat_entry += f"\n  Description: {description}"
+            
+            if subcategories and subcategories != ["N/A"]:
+                cat_entry += f"\n  Sub-categories:"
+                # Get subcategory descriptions if available
+                subcat_descriptions = self.classification_settings.subcategory_descriptions.get(category, {})
+                for subcat in subcategories:
+                    subcat_desc = subcat_descriptions.get(subcat, "")
+                    if subcat_desc:
+                        cat_entry += f"\n    - {subcat}: {subcat_desc}"
+                    else:
+                        cat_entry += f"\n    - {subcat}"
+            else:
+                cat_entry += f"\n  Sub-categories: N/A"
+            
+            category_mapping.append(cat_entry)
+        
+        categories_text = "\n\n".join(category_mapping)
+        
+        # Clean transcript - remove speaker labels for classification (they might confuse the model)
+        clean_transcript = transcript
+        # Remove common speaker label patterns
+        clean_transcript = re.sub(r'^(Agent|Customer|Speaker):\s*', '', clean_transcript, flags=re.MULTILINE)
+        clean_transcript = re.sub(r'\n(Agent|Customer|Speaker):\s*', ' ', clean_transcript)
+        clean_transcript = clean_transcript.strip()
+        
+        prompt = f"""You are an expert classifier for telecom customer service calls (Ooredoo, Algeria).
+
+TASK: Classify the call transcript into ONE category and ONE sub-category.
+
+AVAILABLE CATEGORIES:
+{categories_text}
+
+CLASSIFICATION RULES (READ CAREFULLY):
+1. Read the ENTIRE transcript to understand the MAIN topic/subject.
+2. Choose the category that BEST matches the PRIMARY purpose of the call.
+3. DEFAULT TO "{self.classification_settings.other_category_name}" if uncertain - DO NOT guess!
+4. DO NOT use "Customer Service Support Topic" unless the call is EXPLICITLY about:
+   - Support process issues
+   - Formal complaints about service delivery
+   - Support staff interactions/problems
+   - Service quality complaints
+5. Category selection guide:
+   - Network problems (coverage, speed, dropped calls) → "Network"
+   - Product/service questions (plans, bundles, features) → "Product Category"
+   - Pricing/tariff questions → "Pricing"
+   - Channel/platform issues (app, website, store) → "Channel"
+   - Device issues (phone, tablet, modem) → "Mobile Device"
+   - Brand/loyalty questions → "Brand"
+   - Information requests → "Information"
+   - Process/registration → "Customer Service Process Related"
+   - Support/complaints about service → "Customer Service Support Topic"
+   - Anything unclear or doesn't fit → "{self.classification_settings.other_category_name}"
+6. For sub-category: Select the MOST SPECIFIC sub-category that matches. If none fit, use "N/A".
+7. IMPORTANT: Use EXACT sub-category names as listed (including spaces and dashes).
+
+CRITICAL: 
+- When in doubt, choose "{self.classification_settings.other_category_name}" - it's better to be conservative
+- "Customer Service Support Topic" is ONLY for support process issues, NOT for general questions
+- Network issues go to "Network", NOT "Customer Service Support Topic"
+- Product questions go to "Product Category", NOT "Customer Service Support Topic"
+
+OUTPUT FORMAT (JSON only):
+{{"subject": "EXACT_CATEGORY_NAME", "sub_subject": "EXACT_SUBCATEGORY_NAME_OR_N/A", "confidence": 0.0-1.0}}
+
+Call Transcript:
+{clean_transcript}
+
+JSON Output:"""
+        
+        return prompt
     
     def process(self, transcript: str) -> ServiceResult:
         """
-        Classify transcript into subject categories.
+        Classify transcript into subject categories using local vLLM API (Qwen3-4B).
         
         Args:
             transcript: Transcript to classify
-        
+            
         Returns:
             ServiceResult with subject and sub_subject
         """
         def _classify():
             self.ensure_initialized()
             
-            # Tokenize
-            inputs = self._tokenizer(
-                transcript,
-                return_tensors="pt",
-                truncation=True,
-                max_length=self.model_settings.max_length or 512,
-                padding=True
-            )
+            if not self._api_configured or self._client is None:
+                self.logger.warning("vLLM API not configured. Using fallback classification.")
+                return {
+                    "subject": self.classification_settings.other_category_name,
+                    "sub_subject": "N/A",
+                    "confidence": 0.0
+                }
             
-            if self._device == "cuda":
-                inputs = {k: v.to(self._device) for k, v in inputs.items()}
-            
-            # Classify
-            with torch.no_grad():
-                outputs = self._model(**inputs)
-                logits = outputs.logits
-                predicted_class = torch.argmax(logits, dim=-1).item()
-                probabilities = torch.softmax(logits, dim=-1)[0]
-            
-            max_confidence = probabilities[predicted_class].item()
-            
-            # Get model's label mapping if available
-            model_labels = None
-            if hasattr(self._model.config, 'id2label') and self._model.config.id2label:
-                model_labels = self._model.config.id2label
-                self.logger.info(f"Model has {len(model_labels)} labels: {model_labels}")
-            elif hasattr(self._model.config, 'label2id') and self._model.config.label2id:
-                # Reverse label2id to get id2label
-                model_labels = {v: k for k, v in self._model.config.label2id.items()}
-                self.logger.info(f"Model has {len(model_labels)} labels: {model_labels}")
-            
-            # Log prediction details
-            self.logger.info("=" * 60)
-            self.logger.info("📊 CLASSIFICATION PREDICTION")
-            self.logger.info("=" * 60)
-            self.logger.info(f"Predicted class index: {predicted_class}")
-            self.logger.info(f"Confidence: {max_confidence:.4f}")
-            if model_labels:
-                model_label = model_labels.get(predicted_class, f"Unknown class {predicted_class}")
-                self.logger.info(f"Model label: {model_label}")
-            
-            # Get all probabilities for debugging
-            all_probs = {i: prob.item() for i, prob in enumerate(probabilities)}
-            sorted_probs = sorted(all_probs.items(), key=lambda x: x[1], reverse=True)
-            self.logger.info("Top 3 predictions:")
-            for idx, (class_idx, prob) in enumerate(sorted_probs[:3]):
-                model_label_str = ""
-                if model_labels:
-                    model_label_str = f" ({model_labels.get(class_idx, 'Unknown')})"
-                self.logger.info(f"  {idx+1}. Class {class_idx}{model_label_str}: {prob:.4f}")
-            self.logger.info("=" * 60)
-            
-            # Determine subject
-            subject_labels = self.classification_settings.primary_categories
-            
-            # If model has its own labels, try to map them
-            if model_labels and predicted_class in model_labels:
-                model_label = model_labels[predicted_class]
-                # Try to find matching category (case-insensitive, partial match)
-                matched_subject = None
-                for cat in subject_labels:
-                    if cat.upper() in model_label.upper() or model_label.upper() in cat.upper():
-                        matched_subject = cat
-                        break
+            try:
+                # Build classification prompt
+                prompt = self._build_classification_prompt(transcript)
                 
-                if matched_subject:
-                    subject = matched_subject
-                    self.logger.info(f"Mapped model label '{model_label}' to category '{subject}'")
-                elif max_confidence < self.classification_settings.other_category_threshold:
-                    # Low confidence, use OTHER
-                    subject = self.classification_settings.other_category_name
-                    self.logger.info(f"Low confidence ({max_confidence:.4f}), using {subject}")
-                else:
-                    # Model label doesn't match any category, use OTHER
-                    subject = self.classification_settings.other_category_name
-                    self.logger.warning(f"Model label '{model_label}' doesn't match any category, using {subject}")
-            else:
-                # Fallback: map by index (original behavior)
-                if (predicted_class >= len(subject_labels) or
-                    (self.classification_settings.other_category_threshold > 0.0 and
-                     max_confidence < self.classification_settings.other_category_threshold)):
-                    subject = self.classification_settings.other_category_name
-                    self.logger.info(f"Using {subject} (class {predicted_class} out of range or low confidence)")
-                else:
-                    subject = subject_labels[predicted_class]
-                    self.logger.info(f"Mapped class index {predicted_class} to '{subject}'")
-            
-            # Determine sub-subject
-            allowed_subcategories = self.classification_settings.category_subcategories.get(
-                subject,
-                ["N/A"]
-            )
-            
-            if len(allowed_subcategories) > 1 or (
-                len(allowed_subcategories) == 1 and allowed_subcategories[0] != "N/A"
-            ):
-                default_sub = self.classification_settings.default_subcategory.get(subject)
-                if default_sub and default_sub in allowed_subcategories:
-                    sub_subject = default_sub
-                else:
-                    non_na = [sc for sc in allowed_subcategories if sc != "N/A"]
-                    sub_subject = non_na[0] if non_na else allowed_subcategories[0]
-            else:
-                sub_subject = "N/A"
-            
-            return {
-                "subject": subject,
-                "sub_subject": sub_subject,
-                "confidence": max_confidence
-            }
+                # Call vLLM API using OpenAI-compatible interface
+                response = self._client.chat.completions.create(
+                    model=self.vllm_settings.model_name,  # Must match the model name in Docker
+                    messages=[
+                        {"role": "system", "content": "You are a helpful assistant that outputs only JSON."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=self.vllm_settings.temperature  # Lower temperature for better classification accuracy
+                )
+                
+                # Extract response text
+                raw_text = response.choices[0].message.content
+                
+                # Clean and parse JSON response
+                clean_json = raw_text.replace("```json", "").replace("```", "").strip()
+                data = json.loads(clean_json)
+                
+                # Extract classification results
+                predicted_subject = data.get("subject", "").strip()
+                predicted_sub_subject = data.get("sub_subject", "N/A").strip()
+                confidence = float(data.get("confidence", 0.5))
+                
+                # Validate subject is in predefined categories
+                valid_categories = self.classification_settings.primary_categories
+                if predicted_subject not in valid_categories:
+                    self.logger.warning(
+                        f"vLLM returned invalid category '{predicted_subject}'. "
+                        f"Valid categories: {valid_categories}. Using '{self.classification_settings.other_category_name}'."
+                    )
+                    predicted_subject = self.classification_settings.other_category_name
+                    predicted_sub_subject = "N/A"
+                    confidence = 0.0
+                
+                # If subject is OTHER, sub_subject should always be N/A
+                if predicted_subject == self.classification_settings.other_category_name:
+                    predicted_sub_subject = "N/A"
+                
+                # Validate sub_subject is in allowed sub-categories for the subject
+                allowed_subcategories = self.classification_settings.category_subcategories.get(
+                    predicted_subject,
+                    ["N/A"]
+                )
+                
+                # Normalize sub-category for flexible matching (handle spaces around dashes)
+                def normalize_subcat(subcat: str) -> str:
+                    """Normalize sub-category by removing extra spaces around dashes."""
+                    return re.sub(r'\s*-\s*', ' -', subcat.strip())
+                
+                normalized_predicted = normalize_subcat(predicted_sub_subject)
+                normalized_allowed = {normalize_subcat(sc): sc for sc in allowed_subcategories}
+                
+                if normalized_predicted not in normalized_allowed:
+                    # Try to find a close match (case-insensitive, space-tolerant)
+                    predicted_lower = normalized_predicted.lower()
+                    matched = None
+                    for norm_allowed, original in normalized_allowed.items():
+                        if norm_allowed.lower() == predicted_lower:
+                            matched = original
+                            break
+                    
+                    if matched:
+                        predicted_sub_subject = matched
+                        original_sub_subject = data.get("sub_subject", "")
+                        self.logger.info(f"Matched sub-category '{predicted_sub_subject}' (normalized from '{original_sub_subject}')")
+                    else:
+                        self.logger.warning(
+                            f"vLLM returned invalid sub-category '{predicted_sub_subject}' for '{predicted_subject}'. "
+                            f"Allowed: {allowed_subcategories}. Using default or 'N/A'."
+                        )
+                        # Use default sub-category if available, otherwise first available or N/A
+                        default_sub = self.classification_settings.default_subcategory.get(predicted_subject)
+                        if default_sub and default_sub in allowed_subcategories:
+                            predicted_sub_subject = default_sub
+                        elif allowed_subcategories and allowed_subcategories != ["N/A"]:
+                            non_na = [sc for sc in allowed_subcategories if sc != "N/A"]
+                            predicted_sub_subject = non_na[0] if non_na else "N/A"
+                        else:
+                            predicted_sub_subject = "N/A"
+                
+                # Log classification results
+                self.logger.info("=" * 60)
+                self.logger.info("📊 CLASSIFICATION RESULT")
+                self.logger.info("=" * 60)
+                self.logger.info(f"Subject: {predicted_subject}")
+                self.logger.info(f"Sub-subject: {predicted_sub_subject}")
+                self.logger.info(f"Confidence: {confidence:.4f}")
+                self.logger.info("=" * 60)
+                
+                return {
+                    "subject": predicted_subject,
+                    "sub_subject": predicted_sub_subject,
+                    "confidence": confidence
+                }
+                
+            except json.JSONDecodeError as e:
+                self.logger.error(f"Failed to parse vLLM classification response as JSON: {e}")
+                if 'raw_text' in locals():
+                    self.logger.error(f"Raw response: {raw_text[:200]}...")
+                # Raise exception so orchestrator can detect failure
+                raise RuntimeError(f"Classification JSON parse error: {str(e)}")
+            except Exception as e:
+                self.logger.error(f"vLLM Classification Error: {str(e)}")
+                # Raise exception so orchestrator can detect failure
+                raise RuntimeError(f"Classification service error: {str(e)}")
         
         return self._execute_with_timing(_classify)
-

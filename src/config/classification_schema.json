@@ -1,0 +1,186 @@
+{
+  "primary_categories": [
+    "Customer Service Process Related",
+    "Customer Service Support Topic",
+    "Pricing",
+    "Network",
+    "Miscellaneous",
+    "Product Category",
+    "Channel",
+    "Mobile Device",
+    "Brand",
+    "Information",
+    "OTHER"
+  ],
+  "category_descriptions": {
+    "Customer Service Process Related": "Les commentaires relatives au processe du service client",
+    "Customer Service Support Topic": "Les commentaires relatives au support apporter par le servicesc lient (reclamations,perte de credit,nouveauté et promos)",
+    "Pricing": "Les commentaires conceranat les prix et tarifs appliqué par la marque et les conqurants",
+    "Network": "Les commentaires en relations avec les differents problemes de connexion, lenteure et absance de reseau voix/data, debit.",
+    "Miscellaneous": "les commantaires qui englobe plusieres demande a la fois",
+    "Product Category": "Les commentaires relatives aux demande d'informations et /ou réclamations en rapport avec les produit et services",
+    "Channel": "Les commentaires qui exprimes les soucis rencontré sur les differentes platforme",
+    "Mobile Device": "Les commentaires qui exprime un besoin de configuration, activation,,,,etc sur les diffents appareils (tablette, telephone, modem,,,etc)",
+    "Brand": "Les commentaires qui parles de la credibilité de la marque et de la fidélisation",
+    "Information": "Les commentaires qui exprime tout besoins d'information sur l'utilisation, acquisition,,, d'une offre ou d'un service",
+    "OTHER": "Any call that does not fit into the predefined categories above."
+  },
+  "category_subcategories": {
+    "Customer Service Process Related": [
+      "Process Related_Registration"
+    ],
+    "Customer Service Support Topic": [
+      "Support Topic - Payment Issue",
+      "Support Topic - Complaint",
+      "Support Topic - Broadband Issue",
+      "Support Topic - Mobile Issue",
+      "Support Topic - Stolen",
+      "Support Topic -Membership",
+      "Support Topic -Policy/ legal",
+      "Support Topic -Billing Issue",
+      "Support Topic -Add a line",
+      "Support Topic -Update Or Upgrade",
+      "Support Topic -Cancel",
+      "Support Topic-Landine Issue",
+      "Support Topic -Discount",
+      "Support Topic -Renewal",
+      "Support Topic -New Product",
+      "Support Topic -Setup"
+    ],
+    "Pricing": [
+      "Pricing-Price/Costing"
+    ],
+    "Network": [
+      "Network_Reliablity",
+      "Network_Dropped Calls",
+      "Network_Reception/Coverage",
+      "Network_Speed"
+    ],
+    "Miscellaneous": [
+      "Miscellaneous_Competitor mention",
+      "Miscellaneous_Country mention"
+    ],
+    "Product Category": [
+      "Product Category_Mobile Plan (Prepay)",
+      "Product Category _ Roaming",
+      "Product Category _ Bundles",
+      "Product Category _Mobile Plan (Contract)",
+      "Product Category_Voice",
+      "Product Category_Mobile Date",
+      "Product Category_4G",
+      "Product Category_Broadband",
+      "Product Category _TV",
+      "Product Category_5G"
+    ],
+    "Channel": [
+      "Channel_Technical Support",
+      "Channel_Phone Support",
+      "Channel_In-Store (Retail)",
+      "Channel_Social media Support",
+      "Channel_Technician"
+    ],
+    "Mobile Device": [
+      "Mobile Device Device Repaire",
+      "Mobile Device Hardwar",
+      "Mobile Device_Features",
+      "Mobile Device_Software",
+      "Mobile Device_Accessories",
+      "Mobile Device_Activate"
+    ],
+    "Brand": [
+      "Brand_Trustworthiness",
+      "Brand_Loyalty"
+    ],
+    "Information": [
+      "Information_Availability",
+      "Information_ Ability To Find",
+      "Information_Content"
+    ]
+  },
+  "subcategory_descriptions": {
+    "Customer Service Process Related": {
+      "Process Related_Registration": "Désigne les étapes ou procédures liées à l'acquisition ou à l'inscription d'un utilisateur,ou d'un produit dans un système ou service."
+    },
+    "Customer Service Support Topic": {
+      "Support Topic - Payment Issue": "Désigne les problèmes liés au paiement de factures, cycle de facturation ou tout autre transaction payante (rechargement par carte,storm,,,).",
+      "Support Topic - Complaint": "Fait référence aux réclamations ou plaintes concernant un produit, un service ou une expérience.",
+      "Support Topic - Broadband Issue": "fait référence aux dysfoncyionement ou degradations de la qualité du service internet haut débit (connectivité)",
+      "Support Topic - Mobile Issue": "Désigne les differents soucis liers au appareil mobile (smartphones, tablettes)",
+      "Support Topic - Stolen": "Désigne toutes perte de credit (carrier billing, VAS)",
+      "Support Topic -Membership": "désigne touts fait questions ou interrogations liés à un abonnement ou une adhésion à un service ou une offre (corpo).",
+      "Support Topic -Policy/ legal": "Désigne l'ensemble des consition d'utilisation, acquistion (offres et services) ou relatives au contract.",
+      "Support Topic -Billing Issue": "Désigne toute information ou interrogations liés à la facturation, incluant des erreurs dans les montants facturés, les frais inattendus...",
+      "Support Topic -Add a line": "Désigne les demande d'ajout d'une ligne supplémentaire à un compte ou un abonnement.",
+      "Support Topic -Update Or Upgrade": "Désigne les nouvelle mises a jours disponible pour les offres (App,revampe).",
+      "Support Topic -Cancel": "Désigne toute demande d'annulation/suspension d'une ligne, abonnement ou services.",
+      "Support Topic-Landine Issue": "Désigne le soucis d'acces (lenteur)au system de support, aux applications des offres, ainsi que les problémes d'affichage des pages web du support.",
+      "Support Topic -Discount": "Désigne les demandes d'information relatives aux réductions ou promos.",
+      "Support Topic -Renewal": "Désigne les conseils offerts aux clients pour le renouvellement d'un service, d'un abonnement, d'un contrat ou d'une adhésion",
+      "Support Topic -New Product": "Désigne l'assistance et les conseils fournis aux clients lors de l'introduction, lancement, de l'achat, de l'utilisation d'un nouveau produit.",
+      "Support Topic -Setup": "Désigne l'assistance et les conseils fournis aux clients pour l'installation, la configuration et la mise en service d'un produit."
+    },
+    "Pricing": {
+      "Pricing-Price/Costing": "Désigne toute interrogation ou remarque qui fait référence aux prix des produits ou services, ainsi que le comparatife tarifaires avec les offres des concurant."
+    },
+    "Network": {
+      "Network_Reliablity": "Désigne la stabilité du réseau",
+      "Network_Dropped Calls": "Désigne les cas des appels interrompu,et qui se terminent de manière inattendue en raison d'un problème réseau.",
+      "Network_Reception/Coverage": "Désigne les demandes de nouvelles couverture reseau ainsi que la Qualité de la couverture reseau dans une zone precise.",
+      "Network_Speed": "Désigne toutes interrogration concernat la vitesse de connexion et le debit Internet."
+    },
+    "Miscellaneous": {
+      "Miscellaneous_Competitor mention": "Désigne tout les commentaires qui font referances a une comparaison avec les conqurants.",
+      "Miscellaneous_Country mention": "Désigne les commentaires ou il ya mention d'un pays ou d'une region specifique dans un contexte varié."
+    },
+    "Product Category": {
+      "Product Category_Mobile Plan (Prepay)": "Désigne les commentaires relatives aux offres prépayées, (demandes d'information, réclamation).",
+      "Product Category _ Roaming": "Désigne tout les commentaire en relation avec le services et offres roaming(sms, appel, opérateur partenaire ...).",
+      "Product Category _ Bundles": "Désigne tout les commentaires relatives au bundles (achats, utilisation, validité...).",
+      "Product Category _Mobile Plan (Contract)": "Désigne les interrogation et demandes d'information sur les details des offres disponible (contract et plan d'achat)",
+      "Product Category_Voice": "Désigne les commentaires relatives au soucis du reseau voix (appele).",
+      "Product Category_Mobile Date": "Désigne les commentaires relatives au soucis du reseau Data (connexion).",
+      "Product Category_4G": "désigne tout les commentaires relative au service 4g (activatoion, disponibilité ).",
+      "Product Category_Broadband": "Désigne les commenteire relative a l'accée rapidement à Internet via différents types de technologies(modem, routeur,,,etc).",
+      "Product Category _TV": "Désigne les commentaire relatives au demande d'information concernat les services de streaming et à vidéo à la demande (shahid, Go play)",
+      "Product Category_5G": "Désigne les interrogation et suggestion sur la future disponibilité de la 5G."
+    },
+    "Channel": {
+      "Channel_Technical Support": "Désigne les commentaire qui font reference aux support technique.",
+      "Channel_Phone Support": "Désigne les commentaire relatives au support apporté via le call center.",
+      "Channel_In-Store (Retail)": "Désigne les commentaire relatives au support apporté par les EO,PDV ...etc.",
+      "Channel_Social media Support": "Désigne les commentaire relatives au support apporté via le canal digital.",
+      "Channel_Technician": "Désigne les commentaire relatives au support des equipes technique (intervention terrain etc)."
+    },
+    "Mobile Device": {
+      "Mobile Device Device Repaire": "Désigne tout les commentaires qui inclus reparation etconfiguration des different appareils de telecommunication (modem, routeur, clé...).",
+      "Mobile Device Hardwar": "Désigne les commentaires relatives a l'achat des offres incluent un smartphone ou tablette.",
+      "Mobile Device_Features": "Désigne les commentaire relatives aux caractéristiques des smartphone.",
+      "Mobile Device_Software": "Désigne les commentaires relatives aux telechargment des application dedier (App mobile).",
+      "Mobile Device_Accessories": "Désine les commentaires relatives aux c'est les équipements connecté.",
+      "Mobile Device_Activate": "Désigne les commentaire relative a la mise en marche des appareil mobile."
+    },
+    "Brand": {
+      "Brand_Trustworthiness": "Désigne les commentaire qui font référence à la fiabilité et à la crédibilité d'une marque aux yeux des consommateurs.",
+      "Brand_Loyalty": "Désigne les commentraire qui font a tout les services de fidélité."
+    },
+    "Information": {
+      "Information_Availability": "Désigne tout les commentaires relative a la disponibilité et à l'accessibilité des informations.",
+      "Information_ Ability To Find": "Désigne les commentaire relatives a la facilité de le recherche d'information.",
+      "Information_Content": "Désigne les commentaires relative a la demnade d'informations pour un contenu precis (offres et service)."
+    }
+  },
+  "default_subcategory": {
+    "Customer Service Process Related": "Process Related_Registration",
+    "Customer Service Support Topic": "Support Topic - Complaint",
+    "Pricing": "Pricing-Price/Costing",
+    "Network": "Network_Reception/Coverage",
+    "Miscellaneous": "Miscellaneous_Competitor mention",
+    "Product Category": "Product Category_Mobile Plan (Prepay)",
+    "Channel": "Channel_Phone Support",
+    "Mobile Device": "Mobile Device_Activate",
+    "Brand": "Brand_Trustworthiness",
+    "Information": "Information_Content"
+  }
+}
+
+

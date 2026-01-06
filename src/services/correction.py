@@ -64,7 +64,8 @@ class CorrectionService(BaseService):
                     self._model = self._model.to(self._device)
             
             self._model.eval()
-            self.logger.info(f"✅ Correction model loaded on: {self._device.upper()}")
+            dtype_name = "float16" if self._get_dtype() == torch.float16 else "float32"
+            self.logger.info(f"✅ Correction model loaded on: {self._device.upper()} ({dtype_name})")
             self._initialized = True
             
         except Exception as e:

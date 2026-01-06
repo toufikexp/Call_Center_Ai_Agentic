@@ -23,23 +23,8 @@ def main():
     
     audio_path = sys.argv[1]
     
-    # Load .env file if it exists (before getting settings)
-    from src.core.config import load_env_file
-    load_env_file()
-    
-    # Get Gemini API key from environment (now includes .env file)
-    gemini_key = os.getenv("GEMINI_API_KEY")
-    
-    # Configure settings
+    # Get settings (handles .env loading and configuration internally)
     settings = get_settings()
-    if gemini_key:
-        settings.gemini.api_key = gemini_key
-        # Model name is set in config.py (default: gemini-2.0-flash-exp)
-        print("[INFO] Gemini API key configured for transcript refinement")
-    else:
-        print("[WARNING] Gemini API key not set. Refinement step will be skipped.")
-        print("[INFO] Set GEMINI_API_KEY environment variable to enable refinement")
-    
     set_settings(settings)
     
     print(f"\n🚀 Starting call analysis for: {audio_path}")
@@ -50,12 +35,28 @@ def main():
         pipeline = CallAnalysisPipeline(settings)
         result = pipeline.run(audio_path)
         
-        print("\n✅ Pipeline execution completed successfully!")
-        print(f"📊 Final status: {result['result'].status.value}")
+        final_status = result['result'].status.value
+        
+        # Only print success if status is COMPLETE
+        if final_status == "COMPLETE":
+            print("\n✅ Pipeline execution completed successfully!")
+        elif final_status == "ERROR":
+            print("\n❌ Pipeline execution failed with errors!")
+            if result['result'].error_message:
+                print(f"Error: {result['result'].error_message}")
+        else:
+            print(f"\n⚠️ Pipeline execution completed with status: {final_status}")
+        
+        print(f"📊 Final status: {final_status}")
         print(f"📝 Transcript length: {len(result['result'].transcript)} characters")
         print(f"🎯 Confidence: {result['result'].confidence_score:.3f}")
+        print(f"✨ Refinement Score: {result['result'].refinement_score:.3f}")
         print(f"📂 Subject: {result['result'].subject} / {result['result'].sub_subject}")
         print(f"😊 Satisfaction: {result['result'].satisfaction_score:.3f}")
+        
+        # Exit with error code if pipeline failed
+        if final_status == "ERROR":
+            sys.exit(1)
         
     except FileNotFoundError as e:
         print(f"\n❌ Error: {str(e)}")
