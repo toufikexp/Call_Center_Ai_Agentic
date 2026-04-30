@@ -14,6 +14,8 @@ data/logs/*
 !data/logs/.gitkeep
 data/results/*
 !data/results/.gitkeep
+data/segments/
+data/chunks/
 
 # Model directories (keep structure, exclude contents)
 models/*

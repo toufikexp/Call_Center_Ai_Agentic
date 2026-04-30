@@ -11,3 +11,4 @@ next number and a status of "Proposed", "Accepted", "Deprecated", or
 | 0003 | [Dual-threshold quality gate](0003-dual-threshold-quality-gate.md)               | Accepted |
 | 0004 | [Serve Qwen3-4B via vLLM](0004-vllm-instead-of-local-transformers.md)            | Accepted |
 | 0005 | [Classification taxonomy as JSON data](0005-classification-schema-as-data.md)    | Accepted |
+| 0006 | [Channel split + Silero VAD + PEFT/LoRA at runtime](0006-channel-split-vad-and-peft-loading.md) | Accepted |

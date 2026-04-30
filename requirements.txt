@@ -43,3 +43,9 @@ urllib3==2.5.0
 einops
 transformers_stream_generator
 google-genai
+
+# --- Preprocessing (channel split + VAD) ---
+# Silero VAD weights are loaded via torch.hub the first time the service runs.
+# The `silero-vad` package is optional but pins the model and helpers if you
+# prefer to install rather than rely on torch.hub.
+silero-vad>=4.0

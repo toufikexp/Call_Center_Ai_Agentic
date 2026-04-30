@@ -6,8 +6,8 @@ Guidance for Claude Code (and other AI assistants) working in this repository.
 
 **Call Center AI Agentic Pipeline** — an on-premise LangGraph pipeline that turns
 call center audio (Algerian Darija / Arabic) into structured analytics:
-transcript → refined transcript → quality gate → subject classification →
-customer satisfaction.
+preprocess (channel split + VAD) → transcribe (Whisper + LoRA) → refine →
+quality gate → subject classification → customer satisfaction.
 
 - Entry point: `main.py`
 - Orchestration: `src/pipeline/orchestrator.py` (LangGraph `StateGraph`)
@@ -36,15 +36,18 @@ in `data/chunks/`.
 
 ## External dependencies the pipeline expects at runtime
 
-| Component | Purpose | Default endpoint / path |
+| Component | Purpose | Default |
 |---|---|---|
-| Whisper checkpoint | Transcription | hard-coded path in `src/config/config.py` (`WhisperSettings.model_path`) |
+| Silero VAD weights | Preprocessing (channel split + segmentation) | downloaded once via `torch.hub`; cache via `SILERO_CACHE_DIR` for air-gapped runs |
+| Whisper base model | Transcription base | `WHISPER_BASE_MODEL_ID` (default `openai/whisper-large-v3`) |
+| LoRA adapter (optional) | Fine-tune on top of base | `WHISPER_ADAPTER_PATH` — when unset, `WHISPER_MODEL_PATH` is loaded as a full merged checkpoint |
 | Gemini API | Refinement (cloud) | `gemini-2.0-flash-exp` via `google-genai` |
 | vLLM server | Classification + sentiment | `http://localhost:8080/v1`, model `Qwen/Qwen3-4B` |
 
-If the Whisper model path doesn't exist on the current machine, transcription
-will fail at `initialize()` — update `WhisperSettings.model_path` in
-`src/config/config.py` before assuming the pipeline is broken.
+If neither the base model nor the adapter is loadable, transcription fails at
+`initialize()`. If the adapter's `base_model_name_or_path` doesn't match
+`WHISPER_BASE_MODEL_ID`, the service logs a warning and aligns to the
+adapter's declared base.
 
 ## Repo conventions worth knowing before editing
 
@@ -75,17 +78,29 @@ will fail at `initialize()` — update `WhisperSettings.model_path` in
 - `CorrectionService` (`src/services/correction.py`) is not wired into the
   graph. The file is kept as a reference for a future re-enablement of
   in-process Qwen correction. Don't delete the file; just leave it.
-- `confidence_score` is a real Whisper signal — `exp(mean token log-prob)`
-  computed by `_compute_confidence` in `transcription.py`. For audio longer
-  than `chunk_length_seconds` (30s) the score is computed on the first chunk
-  only, as a representative sample.
+- `confidence_score` is the **mean of per-segment** `exp(mean token log-prob)`
+  across all VAD segments, computed via `output_scores=True` inside
+  `TranscriptionService._batch_confidences`. The default threshold (`0.9`)
+  was calibrated under the previous heuristic; expect to retune it after
+  this migration — see `docs/runbooks/threshold-tuning.md`.
 - Pipeline routes to `MANUAL_REVIEW` whenever Gemini refinement fails OR has
   no API key — that is by design (refinement score 0.0 < 0.5 threshold).
+- Preprocessing emitting **zero segments** (silent / unintelligible audio)
+  routes to `MANUAL_REVIEW`: empty transcript → empty refinement → score 0
+  → manual review. Refinement is short-circuited in this case so we don't
+  send empty input to Gemini.
+- `WhisperSettings.adapter_path` empty is **not** an error: the service
+  loads `WHISPER_MODEL_PATH` as a full merged checkpoint (Path A artifact).
+  Either route works.
 
 ## Where to make common changes
 
 | Change | File |
 |---|---|
+| Swap LoRA adapter (new fine-tune) | env var `WHISPER_ADAPTER_PATH` (no code change) |
+| Swap Whisper base model | env var `WHISPER_BASE_MODEL_ID` (no code change) |
+| Tune VAD thresholds / segment lengths | env (`VAD_*`) or `PreprocessingSettings` defaults |
+| Adjust GPU batch size | env `WHISPER_BATCH_SIZE` or `WhisperSettings.batch_size` |
 | Adjust confidence / refinement thresholds | `src/config/config.py` → `PipelineSettings` |
 | Add / rename a category or sub-category | `src/config/classification_schema.json` |
 | Tweak the refinement prompt | `GeminiSettings.refinement_prompt_template` in `src/config/config.py` |

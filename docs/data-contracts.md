@@ -9,8 +9,16 @@ breaking changes here ripple to consumers of `data/results/*.json`.
 audio file (mp3 / wav)
         │
         ▼
-TranscriptionService.process(audio_path, sample_rate)
-        │  ServiceResult.data = {"transcript": str, "confidence": float}
+PreprocessingService.process(audio_path)
+        │  ServiceResult.data = {"segments": [{"channel", "start_ms", "end_ms", "audio"}, ...]}
+        ▼
+TranscriptionService.process(segments)
+        │  ServiceResult.data = {
+        │      "transcript": str,         # reconstructed dialogue with speaker tags
+        │      "segments":   [{"channel", "start_ms", "end_ms", "text", "confidence"}, ...],
+        │      "confidence": float,       # mean per-segment confidence
+        │      "adapter_version": str,
+        │  }
         ▼
 RefinementService.process(transcript)
         │  ServiceResult.data = {"refined_transcript": str, "refinement_score": float}
@@ -38,20 +46,45 @@ Defined in `src/core/base.py`.
 
 ## Stage contracts
 
-### 1. Transcription
+### 0. Preprocessing
 
-**Input:** path to audio file. Supported formats: anything `librosa.load`
-accepts (mp3, wav, m4a, …).
+**Input:** path to audio file. Supported formats: anything `soundfile.read`
+accepts (wav, flac, ogg) plus mp3/m4a (via the same install of `libsndfile`).
+Stereo recordings are split into agent / client channels; mono recordings
+get a single `unknown` channel.
 
 **Output `data` dict:**
 
-| Key          | Type    | Range / domain                                                                 |
-|--------------|---------|--------------------------------------------------------------------------------|
-| `transcript` | `str`   | Possibly empty                                                                  |
-| `confidence` | `float` | 0.0 – 1.0; `exp(mean token log-prob)` from a direct `model.generate()` pass    |
+| Key        | Type        | Notes                                                                                                |
+|------------|-------------|------------------------------------------------------------------------------------------------------|
+| `segments` | `list[dict]` | Each entry: `{"channel": "agent"\|"client"\|"unknown", "start_ms": int, "end_ms": int, "audio": np.ndarray}` |
 
-**Side effect:** for audio longer than `chunk_length_seconds` (30s), per-chunk
-WAV files are written to `data/chunks/<basename>_chk<NN>.wav`.
+Segments are sorted chronologically across channels. `audio` is float32 mono
+at 16 kHz. Segments shorter than `min_segment_seconds` or longer than
+`max_segment_seconds` are dropped; each kept segment is padded by
+`padding_ms` on each side.
+
+**Side effect:** when `PreprocessingSettings.save_segments` is `true`, each
+segment is also written to `data/segments/<basename>/<basename>_<channel>_<i>_start_<ms>ms.wav`
+for inspection. Off by default.
+
+### 1. Transcription
+
+**Input:** the `segments` list emitted by preprocessing.
+
+**Output `data` dict:**
+
+| Key                | Type        | Range / domain                                                                  |
+|--------------------|-------------|---------------------------------------------------------------------------------|
+| `transcript`       | `str`       | Speaker-tagged dialogue, lines like `"00:05 [Agent]: ..."`                      |
+| `segments`         | `list[dict]` | Per-segment `{"channel", "start_ms", "end_ms", "text", "confidence"}`           |
+| `confidence`       | `float`     | 0.0 – 1.0; mean of per-segment `exp(mean token log-prob)` over non-empty rows   |
+| `adapter_version`  | `str`       | LoRA adapter directory name, or `""` for full merged checkpoints                |
+
+The service runs `model.generate()` once per **batch** of segments (size
+configurable via `WhisperSettings.batch_size`), with `output_scores=True`
+to compute per-segment confidence. Long-form chunking is **not** used —
+each segment is already ≤ `max_segment_seconds`.
 
 ### 2. Refinement
 
@@ -139,9 +172,9 @@ Schema = `CallAnalysisResult.model_dump()` plus a few injected fields.
 | Field                | Type             | Notes                                                                 |
 |----------------------|------------------|-----------------------------------------------------------------------|
 | `call_id`                   | `str`            | `call_<basename>_<8-hex>` if not provided                             |
-| `transcript`                | `str`            | Raw Whisper output                                                    |
+| `transcript`                | `str`            | Reconstructed dialogue (speaker-tagged, chronological)                 |
 | `refined_transcript`        | `str`            | Possibly equal to `transcript` if refinement skipped/failed           |
-| `confidence_score`          | `float [0, 1]`   | `exp(mean token log-prob)` from Whisper                               |
+| `confidence_score`          | `float [0, 1]`   | Mean per-segment `exp(mean token log-prob)`                            |
 | `refinement_score`          | `float [0, 1]`   | From Gemini, or `0.0`                                                 |
 | `subject`                   | `str`            | Taxonomy category or `"OTHER"` / `"UNKNOWN"`                          |
 | `sub_subject`               | `str`            | Sub-category or `"N/A"`                                               |
@@ -149,6 +182,8 @@ Schema = `CallAnalysisResult.model_dump()` plus a few injected fields.
 | `satisfaction_score`        | `float [0, 10]`  | `0.0` means not analyzed                                              |
 | `sentiment_label`           | `str`            | `POSITIVE` / `NEUTRAL` / `NEGATIVE` / `""`                            |
 | `sentiment_reasoning`       | `str`            | One-sentence justification, or `""`                                   |
+| `segments`                  | `list[object]`   | Per-segment `{channel, start_ms, end_ms, text, confidence}`           |
+| `whisper_adapter_version`   | `str`            | LoRA adapter folder name, or `""` for merged checkpoints              |
 | `status`                    | `str`            | One of: `PENDING`, `IN_PROGRESS`, `COMPLETE`, `MANUAL_REVIEW`, `ERROR` |
 | `error_message`             | `str \| null`    | Set when `status == ERROR`                                            |
 | `audio_path`                | `str`            | Injected in `_save_node`                                              |

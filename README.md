@@ -5,13 +5,14 @@ A production-ready, on-premise service-oriented pipeline for call center audio a
 ## 🎯 Overview
 
 This solution implements a complete LangGraph-based pipeline that:
-- Transcribes audio using fine-tuned Whisper models 
+- Splits stereo recordings into agent / client channels and segments each channel with Silero VAD
+- Transcribes the resulting clips with Whisper Large v3 + an optional LoRA adapter (PEFT, merged in memory)
 - Refines transcripts using Gemini API (`gemini-2.0-flash-exp`) with quality scoring
 - Performs quality assurance with dual threshold checking (transcription confidence and refinement quality)
 - Classifies call subjects using local vLLM API (Qwen3-4B) with predefined categories
 - Analyzes customer satisfaction using local vLLM API (Qwen3-4B) for sentiment analysis
 - Routes low-quality transcripts to manual review automatically
-- Ensures all processing runs locally (on-premise) for compliance
+- Ensures all processing runs locally (on-premise) for compliance, with Gemini as the only cloud dependency
 
 **Note**: The correction service is temporarily disabled. The pipeline uses refinement quality scoring to route transcripts directly to classification or manual review.
 

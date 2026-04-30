@@ -103,6 +103,45 @@ class WhisperSettings(ModelSettings):
     chunk_overlap_seconds: float = 2.0
     max_new_tokens: int = 444
 
+    # PEFT / LoRA support. When `adapter_path` is set, the service loads the
+    # base model from `base_model_id` and applies the adapter on top
+    # (merging in memory). When unset, `model_path` is treated as a full
+    # merged checkpoint and loaded directly.
+    base_model_id: str = "openai/whisper-large-v3"
+    adapter_path: Optional[str] = None
+
+    # Per-segment inference. Larger batches give higher GPU throughput at the
+    # cost of VRAM. Values >1 only matter once preprocessing is enabled.
+    batch_size: int = 4
+
+    # Optional 8-bit quantization via bitsandbytes (slower than fp16 on most
+    # GPUs but helps fit on small VRAM). Off by default.
+    use_8bit: bool = False
+
+
+class PreprocessingSettings(BaseModel):
+    """Settings for the audio preprocessing stage (channel split + VAD)."""
+
+    enable: bool = True
+
+    # Silero VAD parameters
+    vad_threshold: float = 0.5
+    min_segment_seconds: float = 1.0
+    max_segment_seconds: float = 30.0
+    padding_ms: int = 250
+
+    # Stereo channel routing. For Ooredoo recordings the agent is on the
+    # left channel and the client on the right.
+    agent_channel: int = 0
+    client_channel: int = 1
+
+    # Optional debug dump of segments to disk under `data/segments/<basename>/`.
+    save_segments: bool = False
+
+    # Where to look for / cache the Silero VAD model. Set to a local path for
+    # fully air-gapped deployments after one warm-up run.
+    silero_cache_dir: Optional[str] = None
+
 
 class LLMSettings(ModelSettings):
     """Settings for LLM models (Qwen, etc.)."""
@@ -199,6 +238,7 @@ class Settings(BaseModel):
     """Main application settings."""
 
     whisper: WhisperSettings
+    preprocessing: PreprocessingSettings
     gemini: GeminiSettings
     qwen: LLMSettings
     vllm: VLLMSettings
@@ -282,15 +322,62 @@ class Settings(BaseModel):
             classification_schema_path
         )
 
+        # Whisper / PEFT configuration from env with safe defaults
+        whisper_defaults = WhisperSettings(model_path="")
+        whisper_base_model_id = os.getenv(
+            "WHISPER_BASE_MODEL_ID", whisper_defaults.base_model_id
+        )
+        whisper_model_path = os.getenv(
+            "WHISPER_MODEL_PATH",
+            "/home/zerrougt/UBC_NLP_Casablanca/whisper_large_gemini_fixed/checkpoint-250",
+        )
+        whisper_adapter_path = os.getenv("WHISPER_ADAPTER_PATH") or None
+        try:
+            whisper_batch_size = int(
+                os.getenv("WHISPER_BATCH_SIZE", str(whisper_defaults.batch_size))
+            )
+        except ValueError:
+            whisper_batch_size = whisper_defaults.batch_size
+        whisper_use_8bit = os.getenv("WHISPER_USE_8BIT", "0").lower() in (
+            "1",
+            "true",
+            "yes",
+        )
+
+        # Preprocessing configuration from env
+        preprocessing_defaults = PreprocessingSettings()
+
+        def _bool_env(name: str, default: bool) -> bool:
+            raw = os.getenv(name)
+            if raw is None:
+                return default
+            return raw.strip().lower() in ("1", "true", "yes", "on")
+
+        def _float_env(name: str, default: float) -> float:
+            raw = os.getenv(name)
+            if raw is None:
+                return default
+            try:
+                return float(raw)
+            except ValueError:
+                return default
+
+        def _int_env(name: str, default: int) -> int:
+            raw = os.getenv(name)
+            if raw is None:
+                return default
+            try:
+                return int(raw)
+            except ValueError:
+                return default
+
         return cls(
             whisper=WhisperSettings(
-                # model_path="/home/zerrougt/Call_Center_Ai_Agentic/models/whisper_dz_asr",
-                # model_path="MohammedNasri/whisper-algerian-dialect",
-                # model_path="/home/zerrougt/UBC_NLP_Casablanca/whisper_large_gemini/checkpoint-500",
-                model_path="/home/zerrougt/UBC_NLP_Casablanca/whisper_large_gemini_fixed/checkpoint-250",
-                # model_path="/home/zerrougt/UBC_NLP_Casablanca/whisper_large_deepseek/phase1_complete/",
-                # model_path="openai/whisper-large-v3",
-                #model_path="/home/zerrougt/UBC_NLP_Casablanca/whisper_large_v3_gemini",
+                model_path=whisper_model_path,
+                base_model_id=whisper_base_model_id,
+                adapter_path=whisper_adapter_path,
+                batch_size=whisper_batch_size,
+                use_8bit=whisper_use_8bit,
                 max_length=448,
                 max_new_tokens=444,
                 language="ar",
@@ -299,6 +386,36 @@ class Settings(BaseModel):
                 chunk_overlap_seconds=2.0,
                 device="auto",
                 dtype="float16",
+            ),
+            preprocessing=PreprocessingSettings(
+                enable=_bool_env("PREPROCESSING_ENABLE", preprocessing_defaults.enable),
+                vad_threshold=_float_env(
+                    "VAD_THRESHOLD", preprocessing_defaults.vad_threshold
+                ),
+                min_segment_seconds=_float_env(
+                    "VAD_MIN_SEGMENT_SECONDS",
+                    preprocessing_defaults.min_segment_seconds,
+                ),
+                max_segment_seconds=_float_env(
+                    "VAD_MAX_SEGMENT_SECONDS",
+                    preprocessing_defaults.max_segment_seconds,
+                ),
+                padding_ms=_int_env(
+                    "VAD_PADDING_MS", preprocessing_defaults.padding_ms
+                ),
+                agent_channel=_int_env(
+                    "PREPROCESSING_AGENT_CHANNEL",
+                    preprocessing_defaults.agent_channel,
+                ),
+                client_channel=_int_env(
+                    "PREPROCESSING_CLIENT_CHANNEL",
+                    preprocessing_defaults.client_channel,
+                ),
+                save_segments=_bool_env(
+                    "PREPROCESSING_SAVE_SEGMENTS",
+                    preprocessing_defaults.save_segments,
+                ),
+                silero_cache_dir=os.getenv("SILERO_CACHE_DIR") or None,
             ),
             gemini=GeminiSettings(
                 api_key=gemini_key,

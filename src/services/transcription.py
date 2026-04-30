@@ -1,417 +1,370 @@
+"""
+Transcription service.
+
+Loads Whisper (optionally with a LoRA adapter merged in memory) and
+transcribes a list of pre-segmented audio clips produced by
+`PreprocessingService`. One `model.generate(...)` call per batch of
+segments — no long-form chunking, because each segment is already ≤ 30 s
+and aligned with how the adapter was trained.
+
+Confidence per segment is `exp(mean token log-prob)` from
+`output_scores=True`, averaged across all segments to produce the
+call-level `confidence_score`.
+"""
+import json
 import math
 import os
-import time
-import threading
-import torch
 from pathlib import Path
-from transformers import pipeline
+from typing import Any, Dict, List, Optional, Tuple
+
+import torch
+from transformers import WhisperForConditionalGeneration, WhisperProcessor
 
 from src.core.base import BaseService, ServiceResult
 from src.core.config import get_settings, WhisperSettings
 
 
+_TARGET_SR = 16000
+
+
 class TranscriptionService(BaseService):
-    """
-    Transcription Service using Hugging Face Pipeline with automatic chunking.
-    
-    Inspired by: https://huggingface.co/blog/asr-chunking
-    
-    The pipeline handles long-form transcription automatically using:
-    - chunk_length_s: Maximum chunk size (30s)
-    - stride_length_s: Overlap between chunks (5s) for better context
-    
-    This approach leverages CTC/Whisper's architecture to merge overlapping
-    chunks intelligently, avoiding boundary artifacts.
-    """
-    
-    def __init__(self, settings: WhisperSettings = None):
+    """Per-segment Whisper transcription with optional PEFT/LoRA adapter."""
+
+    def __init__(self, settings: Optional[WhisperSettings] = None):
         super().__init__("transcription")
         self.settings = settings or get_settings().whisper
-        self._pipe = None
-        self._device = None
-    
-    def _find_latest_checkpoint(self, base_dir: str) -> str | None:
-        """Find the latest checkpoint directory."""
-        if not os.path.exists(base_dir):
-            return None
-        checkpoints = [
-            os.path.join(base_dir, d) for d in os.listdir(base_dir)
-            if "checkpoint-" in d and os.path.isdir(os.path.join(base_dir, d))
-        ]
-        return max(checkpoints, key=os.path.getmtime) if checkpoints else None
-    
+        self._model: Optional[WhisperForConditionalGeneration] = None
+        self._processor: Optional[WhisperProcessor] = None
+        self._device: Optional[str] = None
+        self._dtype: Optional[torch.dtype] = None
+        self._forced_decoder_ids = None
+        self._adapter_version: str = ""
+
+    # ------------------------------------------------------------------
+    # Initialization
+    # ------------------------------------------------------------------
     def initialize(self) -> None:
-        """Initialize the Hugging Face Pipeline with automatic chunking."""
         if self._initialized:
             return
-        
-        # Validate model_path
-        if not self.settings.model_path:
-            raise ValueError("model_path is not set in WhisperSettings")
-        
-        load_path = self._find_latest_checkpoint(self.settings.model_path) or self.settings.model_path
-        
-        # Final validation that load_path is not None
-        if not load_path:
-            raise ValueError(f"Could not determine model path from: {self.settings.model_path}")
-        
-        # Determine base model for tokenizer and feature_extractor (required for checkpoint models)
-        base_model = "openai/whisper-large"  # Default base model for checkpoint compatibility
-        
-        # Determine device and dtype
-        if torch.cuda.is_available() and self.settings.device == "auto":
-            self._device = "cuda:0"  # Use explicit cuda:0 like test script
-        elif self.settings.device == "auto":
-            self._device = "cpu"
-        else:
-            self._device = self.settings.device
-        
-        dtype = torch.float16 if "cuda" in str(self._device) else torch.float32
 
-        self.logger.info(f"Loading Whisper model from: {load_path}")
-        self.logger.info(f"Base model (tokenizer/feature_extractor): {base_model}")
-        self.logger.info(f"Device: {self._device.upper()}, Dtype: {dtype}")
-        self.logger.info(f"Chunk length: {self.settings.chunk_length_seconds}s, Stride: {self.settings.chunk_overlap_seconds}s")
-
-        # Initialize pipeline with automatic chunking support
-        # The pipeline will handle long files by chunking with stride internally
-        # Note: tokenizer and feature_extractor are required for checkpoint models
-        self._pipe = pipeline(
-            "automatic-speech-recognition",
-            model=load_path,
-            tokenizer=base_model,  # Required for checkpoint models
-            feature_extractor=base_model,  # Required for checkpoint models
-            chunk_length_s=self.settings.chunk_length_seconds,
-            stride_length_s=self.settings.chunk_overlap_seconds,
-            device=self._device,
-            dtype=dtype,  # Fixed: use dtype instead of deprecated torch_dtype
-            return_timestamps=False,  # Disable timestamps for faster processing
+        self._device = self._resolve_device()
+        self._dtype = self._resolve_dtype(self._device)
+        self.logger.info(
+            f"Device: {self._device}, dtype: {self._dtype}, "
+            f"batch_size: {self.settings.batch_size}, use_8bit: {self.settings.use_8bit}"
         )
+
+        adapter_path = self.settings.adapter_path
+        base_id_from_adapter = self._read_adapter_base_id(adapter_path) if adapter_path else None
+
+        if adapter_path and base_id_from_adapter and base_id_from_adapter != self.settings.base_model_id:
+            self.logger.warning(
+                f"Adapter was trained on '{base_id_from_adapter}' but settings.base_model_id "
+                f"is '{self.settings.base_model_id}'. Loading the adapter on a mismatched "
+                f"base will produce garbage. Aligning to the adapter's base."
+            )
+            base_model_id = base_id_from_adapter
+        else:
+            base_model_id = self.settings.base_model_id
+
+        # ------------------------------------------------------------------
+        # Load model
+        # ------------------------------------------------------------------
+        if adapter_path:
+            self.logger.info(f"Loading base Whisper: {base_model_id}")
+            base = self._load_base(base_model_id)
+            self.logger.info(f"Applying LoRA adapter from: {adapter_path}")
+            try:
+                from peft import PeftModel
+            except ImportError as e:
+                raise RuntimeError(
+                    "peft is required to load a LoRA adapter. "
+                    "Install with: pip install peft"
+                ) from e
+            model = PeftModel.from_pretrained(base, adapter_path)
+            model = model.merge_and_unload()
+            self._adapter_version = os.path.basename(os.path.normpath(adapter_path))
+        else:
+            # Path A artifact: a full merged checkpoint. `model_path` is the
+            # directory; tokenizer/feature extractor come from `base_model_id`
+            # so they always match the audio domain.
+            load_path = self.settings.model_path or base_model_id
+            self.logger.info(f"Loading merged Whisper checkpoint: {load_path}")
+            model = self._load_base(load_path)
+            self._adapter_version = ""
+
+        if self._device != "cpu" and not self.settings.use_8bit:
+            model = model.to(self._device, dtype=self._dtype)
+        model.eval()
+        self._model = model
+
+        # ------------------------------------------------------------------
+        # Processor (tokenizer + feature extractor) always from the base.
+        # ------------------------------------------------------------------
+        self.logger.info(f"Loading processor: {base_model_id}")
+        self._processor = WhisperProcessor.from_pretrained(
+            base_model_id,
+            language=self.settings.language,
+            task=self.settings.task,
+        )
+        try:
+            self._forced_decoder_ids = self._processor.get_decoder_prompt_ids(
+                language=self.settings.language,
+                task=self.settings.task,
+            )
+        except Exception as e:  # pragma: no cover — depends on base model
+            self.logger.warning(f"Could not derive forced_decoder_ids: {e}")
+            self._forced_decoder_ids = None
+
         self._initialized = True
-        self.logger.info(f"✅ Whisper Pipeline initialized on {self._device.upper()} with automatic chunking")
+        self.logger.info(
+            f"✅ Transcription ready (adapter_version={self._adapter_version or '<merged>'})"
+        )
 
-    def _get_audio_duration(self, audio_path: str) -> float:
-        """Get audio file duration in seconds."""
-        try:
-            import librosa
-            duration = librosa.get_duration(path=audio_path)
-            return duration
-        except ImportError:
-            # librosa not available, try soundfile
+    def _load_base(self, model_id_or_path: str) -> WhisperForConditionalGeneration:
+        kwargs: Dict[str, Any] = {}
+        if self.settings.use_8bit:
             try:
-                import soundfile as sf
-                info = sf.info(audio_path)
-                return info.duration
-            except Exception:
-                return 0.0
+                from transformers import BitsAndBytesConfig
+
+                kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+                kwargs["device_map"] = "auto"
+            except ImportError as e:
+                raise RuntimeError(
+                    "use_8bit=True requires bitsandbytes. "
+                    "Install with: pip install bitsandbytes"
+                ) from e
+        else:
+            kwargs["torch_dtype"] = self._dtype
+        return WhisperForConditionalGeneration.from_pretrained(
+            model_id_or_path, **kwargs
+        )
+
+    @staticmethod
+    def _read_adapter_base_id(adapter_path: str) -> Optional[str]:
+        cfg_path = Path(adapter_path) / "adapter_config.json"
+        if not cfg_path.exists():
+            return None
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            value = cfg.get("base_model_name_or_path")
+            return str(value) if value else None
         except Exception:
-            # Other error, try soundfile as fallback
-            try:
-                import soundfile as sf
-                info = sf.info(audio_path)
-                return info.duration
-            except Exception:
-                return 0.0
-    
-    def _save_audio_chunks(self, audio_path: str, output_dir: str = "data/chunks") -> list:
-        """
-        Split audio file into chunks and save them to disk.
-        
-        This creates chunks matching the pipeline's chunking parameters so that
-        the saved chunks correspond to what the pipeline processes internally.
-        
-        Args:
-            audio_path: Path to input audio file
-            output_dir: Directory to save chunk files
-        
-        Returns:
-            List of paths to saved chunk files
-        """
-        from pathlib import Path
-        
-        # Create output directory if it doesn't exist
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        
-        # Get base filename without extension
-        base_name = Path(audio_path).stem
-        
-        # Load audio file
-        try:
-            import librosa
-            audio_data, sr = librosa.load(audio_path, sr=16000, mono=True)
-        except ImportError:
-            # Fallback to soundfile if librosa is not available
-            try:
-                import soundfile as sf
-                audio_data, sr = sf.read(audio_path)
-                # Convert to mono if stereo
-                if len(audio_data.shape) > 1:
-                    audio_data = audio_data.mean(axis=1)
-                # Resample if needed
-                if sr != 16000:
-                    import librosa
-                    audio_data = librosa.resample(audio_data, orig_sr=sr, target_sr=16000)
-                    sr = 16000
-            except ImportError:
-                raise ImportError("Neither librosa nor soundfile is available. Please install one of them.")
-        
-        # Calculate chunk parameters (matching pipeline settings)
-        chunk_length_samples = int(self.settings.chunk_length_seconds * sr)
-        overlap_samples = int(self.settings.chunk_overlap_seconds * sr)
-        step_samples = chunk_length_samples - overlap_samples
-        
-        if step_samples <= 0:
-            self.logger.warning(f"Overlap ({self.settings.chunk_overlap_seconds}s) >= chunk length ({self.settings.chunk_length_seconds}s). Using no overlap.")
-            step_samples = chunk_length_samples
-            overlap_samples = 0
-        
-        # Calculate number of chunks
-        total_samples = len(audio_data)
-        num_chunks = max(1, (total_samples - overlap_samples + step_samples - 1) // step_samples) if step_samples > 0 else 1
-        
-        self.logger.info(f"💾 Saving {num_chunks} audio chunks to {output_dir}/")
-        
-        # Split and save chunks
-        chunk_paths = []
-        for i in range(num_chunks):
-            start_idx = i * step_samples
-            end_idx = min(start_idx + chunk_length_samples, total_samples)
-            
-            # Extract chunk
-            chunk_audio = audio_data[start_idx:end_idx]
-            
-            # Generate chunk filename
-            chunk_filename = f"{base_name}_chk{i+1:02d}.wav"
-            chunk_path = output_path / chunk_filename
-            
-            # Save chunk
-            try:
-                import soundfile as sf
-                sf.write(str(chunk_path), chunk_audio, sr)
-            except ImportError:
-                # Fallback: use scipy.io.wavfile if soundfile not available
-                try:
-                    from scipy.io import wavfile
-                    wavfile.write(str(chunk_path), sr, chunk_audio)
-                except ImportError:
-                    raise ImportError("soundfile or scipy is required to save audio chunks. Please install one of them.")
-            
-            chunk_paths.append(str(chunk_path))
-            self.logger.info(f"   💾 Saved: {chunk_filename} ({len(chunk_audio)/sr:.2f}s)")
-        
-        self.logger.info(f"✅ Saved {len(chunk_paths)} chunks to {output_dir}/")
-        return chunk_paths
+            return None
 
-    def _show_progress(self, stop_event: threading.Event, audio_duration: float):
-        """Show periodic progress updates during transcription."""
-        start_time = time.time()
-        elapsed = 0
-        update_interval = 7  # Show progress every 5 seconds
-        
-        # Estimate number of chunks
-        chunk_size = self.settings.chunk_length_seconds
-        estimated_chunks = max(1, int(audio_duration / chunk_size) + 1)
-        
-        self.logger.info(f"📊 Audio duration: {audio_duration:.1f}s")
-        self.logger.info(f"📦 Estimated chunks: ~{estimated_chunks} (chunk size: {chunk_size}s)")
-        self.logger.info("🔄 Starting transcription...")
-        
-        while not stop_event.is_set():
-            time.sleep(update_interval)
-            if stop_event.is_set():
-                break
-            
-            elapsed = time.time() - start_time
-            progress_pct = min(100, (elapsed / max(audio_duration * 0.3, 1)) * 100)  # Rough estimate
-            self.logger.info(f"⏳ Processing... ({elapsed:.0f}s elapsed, ~{progress_pct:.0f}% estimated)")
-    
-    def process(self, audio_path: str, sample_rate: int = 16000) -> ServiceResult:
-        """
-        Transcribe audio file using pipeline with automatic chunking.
-        
-        The pipeline handles:
-        - Long-form audio via internal chunking with stride
-        - Overlapping chunks for better context
-        - Automatic merging of chunk outputs
-        
-        Args:
-            audio_path: Path to audio file
-            sample_rate: Target sample rate (pipeline handles conversion automatically)
-        
-        Returns:
-            ServiceResult with transcript and confidence score
-        """
-        def _execute():
-            self.ensure_initialized()
-            
-            if not os.path.exists(audio_path):
-                raise FileNotFoundError(f"Audio file not found: {audio_path}")
-            
-            self.logger.info(f"📁 Loading audio: {os.path.basename(audio_path)}")
-            
-            # Get audio duration for progress estimation
-            audio_duration = self._get_audio_duration(audio_path)
-            
-            # Save audio chunks to disk if audio is long enough to be chunked
-            chunk_paths = []
-            if audio_duration > self.settings.chunk_length_seconds:
-                try:
-                    chunk_paths = self._save_audio_chunks(audio_path, output_dir="data/chunks")
-                except Exception as e:
-                    self.logger.warning(f"Failed to save audio chunks: {e}. Continuing with transcription...")
-            
-            # Start progress indicator in background thread
-            stop_progress = threading.Event()
-            progress_thread = None
-            if audio_duration > 0:
-                progress_thread = threading.Thread(
-                    target=self._show_progress,
-                    args=(stop_progress, audio_duration),
-                    daemon=True
-                )
-                progress_thread.start()
-            
-            try:
-                self.logger.info("🎤 Loading audio with librosa (ensures 16kHz sample rate)")
-                
-                # Load audio with librosa first (ensures 16kHz, critical for Whisper)
-                # This matches the working test script approach
-                import librosa
-                audio_array, sampling_rate = librosa.load(audio_path, sr=16000)
-                self.logger.info(f"✅ Audio loaded: {len(audio_array)} samples at {sampling_rate}Hz")
-                
-                self.logger.info("🎤 Using pipeline automatic chunking with stride")
-                
-                # Pass the audio array to the pipeline (not the file path)
-                # The pipeline will:
-                # 1. Handle chunking with stride internally (chunk_length_s, stride_length_s)
-                # 2. Merge overlapping chunks intelligently
-                # 3. Return the complete transcript
-                result = self._pipe(
-                    audio_array,  # Pass array instead of file path (matches test script)
-                    chunk_length_s=self.settings.chunk_length_seconds,
-                    stride_length_s=self.settings.chunk_overlap_seconds,
-                    return_timestamps=True,  # Helps keep track of context for long files
-                    generate_kwargs={
-                        "task": self.settings.task,
-                        "repetition_penalty": 1.2,
-                        "no_repeat_ngram_size": 4,
-                        "do_sample": False,
-                        "num_beams": 1,
-                    }
-                )
-                
-                # Stop progress indicator
-                stop_progress.set()
-                if progress_thread:
-                    progress_thread.join(timeout=1)
-                
-                full_text = result["text"].strip() if result.get("text") else ""
-                
-                self.logger.info("=" * 60)
-                self.logger.info("📝 TRANSCRIPTION RESULT")
-                self.logger.info("=" * 60)
-                if full_text:
-                    # Show preview if transcript is long
-                    preview = full_text[:200] + "..." if len(full_text) > 200 else full_text
-                    self.logger.info(f"Transcript preview: {preview}")
-                    self.logger.info(f"Full length: {len(full_text)} characters, {len(full_text.split())} words")
-                else:
-                    self.logger.info("(Empty transcript)")
-                self.logger.info("=" * 60)
-                
-                confidence = self._compute_confidence(audio_array)
+    def _resolve_device(self) -> str:
+        if self.settings.use_8bit:
+            # bitsandbytes manages device placement via device_map="auto"
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        if self.settings.device == "auto":
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        return self.settings.device
 
-                return {
-                    "transcript": full_text,
-                    "confidence": confidence,
-                }
-            except Exception as e:
-                # Stop progress indicator on error
-                stop_progress.set()
-                if progress_thread:
-                    progress_thread.join(timeout=1)
-                raise
+    def _resolve_dtype(self, device: str) -> torch.dtype:
+        if device == "cpu":
+            return torch.float32
+        if self.settings.dtype == "float16":
+            return torch.float16
+        if self.settings.dtype == "bfloat16":
+            return torch.bfloat16
+        return torch.float32
 
-        return self._execute_with_timing(_execute)
+    # ------------------------------------------------------------------
+    # Inference
+    # ------------------------------------------------------------------
+    def process(self, segments: List[Dict[str, Any]]) -> ServiceResult:
+        """Transcribe a list of preprocessing segments.
 
-    def _compute_confidence(self, audio_array, sample_rate: int = 16000) -> float:
-        """
-        Real Whisper confidence from token log-probs.
+        Each input segment is a dict with keys: channel, start_ms, end_ms,
+        audio (np.ndarray, float32, 16 kHz mono).
 
-        Runs an extra `model.generate(..., output_scores=True)` pass on the
-        audio (first `chunk_length_seconds` for long-form input), computes
-        the mean log-prob of the chosen tokens, and maps it to [0, 1] via
-        `exp(mean_log_prob)`.
-
-        Returns 0.0 if the empty model output prevents scoring (e.g. silence).
-        """
-        if audio_array is None or len(audio_array) == 0:
-            return 0.0
-
-        # Score the first chunk_length_seconds as a representative sample.
-        # Whisper's encoder operates on 30-second windows; longer inputs
-        # would either need long-form generation (slow) or chunk averaging.
-        max_samples = int(self.settings.chunk_length_seconds * sample_rate)
-        sample = audio_array[:max_samples]
-
-        try:
-            features = self._pipe.feature_extractor(
-                sample,
-                sampling_rate=sample_rate,
-                return_tensors="pt",
-            ).input_features
-
-            model = self._pipe.model
-            device = next(model.parameters()).device
-            dtype = next(model.parameters()).dtype
-            features = features.to(device=device, dtype=dtype)
-
-            generate_kwargs = {
-                "task": self.settings.task,
-                "max_new_tokens": self.settings.max_new_tokens,
-                "return_dict_in_generate": True,
-                "output_scores": True,
-                "do_sample": False,
-                "num_beams": 1,
-                "repetition_penalty": 1.2,
-                "no_repeat_ngram_size": 4,
+        Returns ServiceResult with data:
+            {
+                "transcript": str,           # reconstructed dialogue
+                "segments":   list[dict],    # per-segment text + confidence
+                "confidence": float,         # mean per-segment confidence
+                "adapter_version": str,
             }
-            if self.settings.language:
-                generate_kwargs["language"] = self.settings.language
+        """
 
-            with torch.no_grad():
-                output = model.generate(features, **generate_kwargs)
+        def _run():
+            self.ensure_initialized()
 
-            scores = getattr(output, "scores", None)
-            if not scores:
-                return 0.0
+            if not segments:
+                self.logger.warning("No segments to transcribe")
+                return {
+                    "transcript": "",
+                    "segments": [],
+                    "confidence": 0.0,
+                    "adapter_version": self._adapter_version,
+                }
 
-            # scores: tuple of [batch, vocab] tensors, one per generated step
-            stacked = torch.stack(scores, dim=1).float()        # [B, T, V]
-            log_probs = torch.log_softmax(stacked, dim=-1)
-            gen_len = stacked.size(1)
-            gen_ids = output.sequences[:, -gen_len:]
-            token_logprobs = log_probs.gather(2, gen_ids.unsqueeze(-1)).squeeze(-1)  # [B, T]
+            transcribed: List[Dict[str, Any]] = []
+            batch_size = max(1, int(self.settings.batch_size))
 
-            # Mask out EOS / pad tokens so trailing junk doesn't drag the score.
-            tokenizer = self._pipe.tokenizer
-            eos_id = getattr(tokenizer, "eos_token_id", None)
-            pad_id = getattr(tokenizer, "pad_token_id", None)
-            mask = torch.ones_like(gen_ids, dtype=torch.bool)
-            if eos_id is not None:
-                mask &= gen_ids != eos_id
-            if pad_id is not None:
-                mask &= gen_ids != pad_id
+            for batch_start in range(0, len(segments), batch_size):
+                batch = segments[batch_start : batch_start + batch_size]
+                batch_results = self._transcribe_batch(batch)
+                transcribed.extend(batch_results)
 
-            if mask.any():
-                avg_logprob = (token_logprobs * mask).sum() / mask.sum()
+            transcript = self._reconstruct_dialogue(transcribed)
+            confidences = [s["confidence"] for s in transcribed if s["confidence"] > 0]
+            avg_confidence = (
+                sum(confidences) / len(confidences) if confidences else 0.0
+            )
+
+            self.logger.info("=" * 60)
+            self.logger.info("📝 TRANSCRIPTION RESULT")
+            self.logger.info("=" * 60)
+            self.logger.info(f"Segments transcribed: {len(transcribed)}")
+            self.logger.info(f"Mean confidence: {avg_confidence:.3f}")
+            preview = transcript[:200] + ("..." if len(transcript) > 200 else "")
+            self.logger.info(f"Preview: {preview}")
+            self.logger.info("=" * 60)
+
+            return {
+                "transcript": transcript,
+                "segments": transcribed,
+                "confidence": avg_confidence,
+                "adapter_version": self._adapter_version,
+            }
+
+        return self._execute_with_timing(_run)
+
+    def _transcribe_batch(
+        self, batch: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Run one batched generate over the given segments. On CUDA OOM,
+        falls back to halving the batch size recursively until size 1."""
+        try:
+            return self._do_batch(batch)
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            if len(batch) == 1:
+                self.logger.error(
+                    "CUDA OOM on a single segment — segment may be too long. Skipping."
+                )
+                return [self._failed_segment(batch[0], "CUDA OOM on single segment")]
+            mid = len(batch) // 2
+            self.logger.warning(
+                f"CUDA OOM on batch of {len(batch)}; retrying as 2 batches of {mid} / {len(batch) - mid}"
+            )
+            return self._transcribe_batch(batch[:mid]) + self._transcribe_batch(batch[mid:])
+
+    def _do_batch(self, batch: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        audios = [seg["audio"] for seg in batch]
+        features = self._processor(
+            audios,
+            sampling_rate=_TARGET_SR,
+            return_tensors="pt",
+            padding=True,
+        ).input_features
+        features = features.to(self._device, dtype=self._dtype)
+
+        gen_kwargs: Dict[str, Any] = {
+            "max_new_tokens": self.settings.max_new_tokens,
+            "do_sample": False,
+            "num_beams": 1,
+            "repetition_penalty": 1.2,
+            "no_repeat_ngram_size": 4,
+            "return_dict_in_generate": True,
+            "output_scores": True,
+        }
+        if self._forced_decoder_ids is not None:
+            gen_kwargs["forced_decoder_ids"] = self._forced_decoder_ids
+
+        with torch.no_grad():
+            output = self._model.generate(features, **gen_kwargs)
+
+        sequences = output.sequences  # [B, full_len]
+        scores = getattr(output, "scores", None)
+
+        # Per-token log-probs of the chosen tokens (generated portion only)
+        per_segment_confidence = self._batch_confidences(sequences, scores)
+
+        # Decode every sequence in the batch
+        texts = self._processor.batch_decode(sequences, skip_special_tokens=True)
+
+        results: List[Dict[str, Any]] = []
+        for seg, text, conf in zip(batch, texts, per_segment_confidence):
+            results.append({
+                "channel": seg["channel"],
+                "start_ms": int(seg["start_ms"]),
+                "end_ms": int(seg["end_ms"]),
+                "text": text.strip(),
+                "confidence": float(conf),
+            })
+        return results
+
+    def _batch_confidences(
+        self,
+        sequences: torch.Tensor,
+        scores: Optional[Tuple[torch.Tensor, ...]],
+    ) -> List[float]:
+        """Return per-row `exp(mean token log-prob)` over the generated tail."""
+        if not scores:
+            return [0.0] * sequences.size(0)
+
+        stacked = torch.stack(scores, dim=1).float()  # [B, T, V]
+        log_probs = torch.log_softmax(stacked, dim=-1)
+        gen_len = stacked.size(1)
+        gen_ids = sequences[:, -gen_len:]
+        token_logprobs = log_probs.gather(2, gen_ids.unsqueeze(-1)).squeeze(-1)  # [B, T]
+
+        tokenizer = self._processor.tokenizer
+        eos_id = getattr(tokenizer, "eos_token_id", None)
+        pad_id = getattr(tokenizer, "pad_token_id", None)
+
+        mask = torch.ones_like(gen_ids, dtype=torch.bool)
+        if eos_id is not None:
+            mask &= gen_ids != eos_id
+        if pad_id is not None:
+            mask &= gen_ids != pad_id
+
+        confidences: List[float] = []
+        for row_logprobs, row_mask in zip(token_logprobs, mask):
+            if row_mask.any():
+                avg = (row_logprobs * row_mask).sum() / row_mask.sum()
+            elif row_logprobs.numel() > 0:
+                avg = row_logprobs.mean()
             else:
-                avg_logprob = token_logprobs.mean()
+                confidences.append(0.0)
+                continue
+            confidences.append(max(0.0, min(1.0, math.exp(float(avg.item())))))
+        return confidences
 
-            confidence = math.exp(float(avg_logprob.item()))
-            return max(0.0, min(1.0, confidence))
-        except Exception as e:
-            self.logger.warning(f"Confidence scoring failed: {e}. Returning 0.0.")
-            return 0.0
+    @staticmethod
+    def _failed_segment(seg: Dict[str, Any], reason: str) -> Dict[str, Any]:
+        return {
+            "channel": seg["channel"],
+            "start_ms": int(seg["start_ms"]),
+            "end_ms": int(seg["end_ms"]),
+            "text": "",
+            "confidence": 0.0,
+        }
+
+    # ------------------------------------------------------------------
+    # Output formatting
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _channel_label(channel: str) -> str:
+        if channel == "agent":
+            return "[Agent]"
+        if channel == "client":
+            return "[Subscriber]"
+        return "[Speaker]"
+
+    @classmethod
+    def _reconstruct_dialogue(cls, segments: List[Dict[str, Any]]) -> str:
+        """Concatenate non-empty segments in chronological order with
+        speaker labels and timestamps."""
+        lines: List[str] = []
+        for seg in segments:
+            text = seg.get("text", "").strip()
+            if not text:
+                continue
+            mm, ss = divmod(int(seg["start_ms"]) // 1000, 60)
+            timestamp = f"{mm:02d}:{ss:02d}"
+            lines.append(f"{timestamp} {cls._channel_label(seg['channel'])}: {text}")
+        return "\n".join(lines)

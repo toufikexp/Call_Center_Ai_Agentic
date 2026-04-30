@@ -9,8 +9,9 @@ import logging
 from typing import Optional
 from langgraph.graph import StateGraph, END
 
-from src.core.state import PipelineState, CallAnalysisResult, ProcessingStatus
+from src.core.state import PipelineState, CallAnalysisResult, SegmentResult, ProcessingStatus
 from src.core.config import get_settings, Settings
+from src.services.preprocessing import PreprocessingService
 from src.services.transcription import TranscriptionService
 from src.services.refinement import RefinementService
 from src.services.classification import ClassificationService
@@ -25,6 +26,7 @@ class CallAnalysisPipeline:
         self.logger = self._create_logger()
         
         # Initialize services
+        self.preprocessing_service = PreprocessingService(self.settings.preprocessing)
         self.transcription_service = TranscriptionService(self.settings.whisper)
         self.refinement_service = RefinementService(self.settings.gemini)
         self.classification_service = ClassificationService(
@@ -54,16 +56,26 @@ class CallAnalysisPipeline:
         workflow = StateGraph(PipelineState)
         
         # Add nodes
+        workflow.add_node("preprocess", self._preprocess_node)
         workflow.add_node("transcribe", self._transcribe_node)
         workflow.add_node("refine", self._refine_node)
         workflow.add_node("verify", self._verify_node)
         workflow.add_node("classify", self._classify_node)
         workflow.add_node("analyze_sentiment", self._sentiment_node)
         workflow.add_node("save_result", self._save_node)
-        
+
         # Set entry point
-        workflow.set_entry_point("transcribe")
-        
+        workflow.set_entry_point("preprocess")
+
+        # Preprocessing failure short-circuits to save with ERROR status.
+        workflow.add_conditional_edges(
+            "preprocess",
+            self._check_error,
+            {
+                "continue": "transcribe",
+                "error": "save_result",
+            },
+        )
         # Add edges
         workflow.add_edge("transcribe", "refine")
         workflow.add_edge("refine", "verify")
@@ -101,39 +113,72 @@ class CallAnalysisPipeline:
         
         return workflow.compile()
     
-    def _transcribe_node(self, state: PipelineState) -> PipelineState:
-        """Transcribe audio node."""
+    def _preprocess_node(self, state: PipelineState) -> PipelineState:
+        """Channel split + VAD segmentation."""
         result = state["result"]
         audio_path = state["audio_path"]
-        run_count = state["run_count"]
 
-        service_result = self.transcription_service.process(
-            audio_path,
-            self.settings.pipeline.audio_sample_rate
-        )
-        
+        service_result = self.preprocessing_service.process(audio_path)
+
+        if not service_result.success:
+            result.status = ProcessingStatus.ERROR
+            result.error_message = service_result.error or "Preprocessing failed"
+            self.logger.error(f"Preprocessing failed: {result.error_message}")
+            return {"result": result, "segments": []}
+
+        segments = service_result.data.get("segments", [])
+        if not segments:
+            # No speech detected — treat as low-quality input headed to manual review.
+            self.logger.warning("No speech segments detected; routing to manual review")
+            result.transcript = ""
+            result.confidence_score = 0.0
+        return {"result": result, "segments": segments}
+
+    def _transcribe_node(self, state: PipelineState) -> PipelineState:
+        """Transcribe pre-segmented audio."""
+        result = state["result"]
+        run_count = state.get("run_count", 0)
+        segments = state.get("segments", [])
+
+        if not segments:
+            # Nothing to transcribe — leave result empty, routing will pick it up.
+            return {"result": result, "run_count": run_count + 1}
+
+        service_result = self.transcription_service.process(segments)
+
         if service_result.success:
-            result.transcript = service_result.data["transcript"]
-            result.confidence_score = service_result.data["confidence"]
+            data = service_result.data
+            result.transcript = data["transcript"]
+            result.confidence_score = data["confidence"]
+            result.whisper_adapter_version = data.get("adapter_version", "")
+            result.segments = [
+                SegmentResult(**s) for s in data.get("segments", [])
+            ]
         else:
             result.transcript = f"Error: {service_result.error}"
             result.confidence_score = 0.0
             result.status = ProcessingStatus.ERROR
             result.error_message = service_result.error
-        
-        return {
-            "result": result,
-            "run_count": run_count + 1
-        }
-    
+
+        return {"result": result, "run_count": run_count + 1}
+
+
     def _refine_node(self, state: PipelineState) -> PipelineState:
         """Refine transcript node."""
         result = state["result"]
-        
+
         # Check if already in error state, skip processing
         if result.status == ProcessingStatus.ERROR:
             return {"result": result}
-        
+
+        # Empty transcript (e.g. preprocessing detected no speech) → skip
+        # the Gemini call and let routing send the run to manual review.
+        if not result.transcript.strip():
+            self.logger.info("Empty transcript; skipping refinement")
+            result.refined_transcript = ""
+            result.refinement_score = 0.0
+            return {"result": result}
+
         service_result = self.refinement_service.process(result.transcript)
         
         if not service_result.success:
@@ -313,6 +358,8 @@ class CallAnalysisPipeline:
         self.logger.info(f"Status: {result.status.value}")
         self.logger.info(f"Confidence: {result.confidence_score:.3f}")
         self.logger.info(f"Refinement Score: {result.refinement_score:.3f}")
+        self.logger.info(f"Segments: {len(result.segments)}")
+        self.logger.info(f"Adapter: {result.whisper_adapter_version or '<merged>'}")
         self.logger.info(f"Subject: {result.subject} / {result.sub_subject}")
         self.logger.info(f"Satisfaction: {result.satisfaction_score:.3f}")
         self.logger.info(f"Result saved to: {output_path}")
@@ -345,6 +392,7 @@ class CallAnalysisPipeline:
             "audio_path": audio_path,
             "call_id": call_id,
             "run_count": 0,
+            "segments": [],
             "result": CallAnalysisResult(
                 call_id=call_id,
                 status=ProcessingStatus.PENDING,

@@ -21,11 +21,13 @@ LangGraph; each stage is a self-contained service.
             │              src/pipeline/orchestrator.py               │
             └────────────────────────┬────────────────────────────────┘
                                      │
-   ┌──────────────┬──────────────┬───┴───────┬──────────────┬──────────────┐
-   ▼              ▼              ▼           ▼              ▼              ▼
-Transcription  Refinement     Verify     Classification  Sentiment   SaveResult
-(Whisper      (Gemini API   (gating    (vLLM /         (vLLM /     (writes
- HF pipeline)  + JSON)       node)      Qwen3-4B)       Qwen3-4B)   JSON)
+ ┌────────────┬─────────────┬────────┴────┬─────────┬───────────────┬─────────┬─────────┐
+ ▼            ▼             ▼             ▼         ▼               ▼         ▼         ▼
+Preprocess  Transcribe   Refine        Verify    Classify       Sentiment   SaveResult
+(stereo     (Whisper +   (Gemini API   (gating   (vLLM /        (vLLM /     (writes
+ split,      LoRA, per-   + JSON)       node)     Qwen3-4B)      Qwen3-4B)   JSON)
+ Silero      segment
+ VAD)        batched)
 ```
 
 ## Pipeline graph
@@ -34,6 +36,9 @@ Built in `_build_graph()` in `src/pipeline/orchestrator.py`. Edges:
 
 ```
 START
+  │
+  ▼
+preprocess ──(error)──► save_result
   │
   ▼
 transcribe ──► refine ──► verify
@@ -93,7 +98,8 @@ Performed in `_save_node`:
 ┌─────────────────────────────┴────────────────────────────────────┐
 │                        src/services/                              │
 │                                                                   │
-│   transcription.py    TranscriptionService  → Whisper (local)     │
+│   preprocessing.py    PreprocessingService → soundfile + Silero   │
+│   transcription.py    TranscriptionService  → Whisper + LoRA      │
 │   refinement.py       RefinementService     → Gemini API (cloud)  │
 │   correction.py       CorrectionService     → Qwen (DISABLED)     │
 │   classification.py   ClassificationService → vLLM (local)        │
@@ -150,7 +156,8 @@ Per-stage transformation of `CallAnalysisResult`:
 
 | Stage           | Reads                          | Writes                                                    |
 |-----------------|--------------------------------|-----------------------------------------------------------|
-| transcribe      | `audio_path`                   | `transcript`, `confidence_score`, (`status` on error)                          |
+| preprocess      | `audio_path`                   | `state["segments"]` (channel-split + VAD-cut clips)                            |
+| transcribe      | `state["segments"]`            | `transcript` (reconstructed dialogue), `confidence_score`, `segments`, `whisper_adapter_version` |
 | refine          | `transcript`                   | `refined_transcript`, `refinement_score`                                       |
 | verify          | scores                         | `status` → `IN_PROGRESS` (logging only)                                        |
 | classify        | `refined_transcript or transcript` | `subject`, `sub_subject`, `classification_confidence`                      |
@@ -170,11 +177,11 @@ Per-stage transformation of `CallAnalysisResult`:
 ```
 data/
 ├── audio_files/    # inputs (gitignored)
-├── chunks/         # auto-saved Whisper chunks for audio > 30s
+├── segments/       # optional per-segment WAVs for VAD debugging (gitignored)
 ├── results/        # output JSON, one per call
 └── logs/           # reserved (file logging not enabled by default)
 
-models/             # local checkpoints (gitignored)
+models/             # local checkpoints / adapters (gitignored)
 ```
 
 ## Performance / scaling notes
