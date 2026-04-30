@@ -13,7 +13,6 @@ from src.core.state import PipelineState, CallAnalysisResult, ProcessingStatus
 from src.core.config import get_settings, Settings
 from src.services.transcription import TranscriptionService
 from src.services.refinement import RefinementService
-from src.services.correction import CorrectionService
 from src.services.classification import ClassificationService
 from src.services.sentiment import SentimentService
 
@@ -28,9 +27,6 @@ class CallAnalysisPipeline:
         # Initialize services
         self.transcription_service = TranscriptionService(self.settings.whisper)
         self.refinement_service = RefinementService(self.settings.gemini)
-        # Temporarily disable correction service
-        # self.correction_service = CorrectionService(self.settings.qwen)
-        self.correction_service = None
         self.classification_service = ClassificationService(
             self.settings.vllm,
             self.settings.classification
@@ -61,7 +57,6 @@ class CallAnalysisPipeline:
         workflow.add_node("transcribe", self._transcribe_node)
         workflow.add_node("refine", self._refine_node)
         workflow.add_node("verify", self._verify_node)
-        workflow.add_node("correct", self._correct_node)
         workflow.add_node("classify", self._classify_node)
         workflow.add_node("analyze_sentiment", self._sentiment_node)
         workflow.add_node("save_result", self._save_node)
@@ -82,9 +77,6 @@ class CallAnalysisPipeline:
                 "manual_review": "save_result"
             }
         )
-        
-        # Correction step temporarily disabled - node kept for future re-enablement
-        # workflow.add_edge("correct", "save_result")
         
         # Success path with error checking
         workflow.add_conditional_edges(
@@ -114,17 +106,7 @@ class CallAnalysisPipeline:
         result = state["result"]
         audio_path = state["audio_path"]
         run_count = state["run_count"]
-        
-        # If already corrected, recalculate confidence
-        if result.is_corrected and result.transcript:
-            confidence = self.transcription_service.recalculate_confidence(result.transcript)
-            result.confidence_score = confidence
-            return {
-                "result": result,
-                "run_count": run_count + 1
-            }
-        
-        # Fresh transcription
+
         service_result = self.transcription_service.process(
             audio_path,
             self.settings.pipeline.audio_sample_rate
@@ -228,30 +210,6 @@ class CallAnalysisPipeline:
         self.logger.info(f"Routing decision: confidence={confidence:.3f}, refinement_score={refinement_score:.3f}, routing to 'proceed' (classification)")
         return "proceed"
     
-    def _correct_node(self, state: PipelineState) -> PipelineState:
-        """Correct transcript node."""
-        result = state["result"]
-        
-        # Use refined transcript if available, otherwise original
-        transcript_to_correct = result.refined_transcript or result.transcript
-        
-        try:
-            service_result = self.correction_service.process(transcript_to_correct)
-            
-            if service_result.success:
-                result.transcript = service_result.data["corrected_transcript"]
-                result.is_corrected = True
-            else:
-                # Keep original on error
-                result.is_corrected = False
-                self.logger.warning(f"Correction failed: {service_result.error}. Using original transcript.")
-        except Exception as e:
-            # If correction service is not available, skip correction
-            result.is_corrected = False
-            self.logger.warning(f"Correction service unavailable: {e}. Skipping correction step.")
-        
-        return {"result": result}
-    
     def _classify_node(self, state: PipelineState) -> PipelineState:
         """Classify subject node."""
         result = state["result"]
@@ -275,14 +233,10 @@ class CallAnalysisPipeline:
             self.logger.error(f"Classification failed: {result.error_message}")
             return {"result": result}
         
-        # Check if classification actually failed (subject = "OTHER" with 0.0 confidence might indicate error)
-        # But we'll accept the result since service returned success
         result.subject = service_result.data.get("subject", "UNKNOWN")
         result.sub_subject = service_result.data.get("sub_subject", "N/A")
-        
-        # Additional check: if we get "UNKNOWN" or empty subject, it might be an error
-        # But since the service returned success, we'll trust it
-        
+        result.classification_confidence = float(service_result.data.get("confidence", 0.0))
+
         return {"result": result}
     
     def _sentiment_node(self, state: PipelineState) -> PipelineState:
@@ -307,7 +261,9 @@ class CallAnalysisPipeline:
         
         # Service succeeded
         result.satisfaction_score = service_result.data.get("satisfaction_score", 0.0)
-        
+        result.sentiment_label = service_result.data.get("sentiment_label", "")
+        result.sentiment_reasoning = service_result.data.get("reasoning", "")
+
         return {"result": result}
     
     def _save_node(self, state: PipelineState) -> PipelineState:
@@ -319,15 +275,10 @@ class CallAnalysisPipeline:
         if result.status == ProcessingStatus.ERROR:
             pass  # Keep error status - pipeline stopped due to error
         elif result.refinement_score < self.settings.pipeline.refinement_threshold:
-            # Refinement failed or quality too low
             result.status = ProcessingStatus.MANUAL_REVIEW
         elif result.confidence_score < self.settings.pipeline.confidence_threshold:
-            if state["run_count"] >= self.settings.pipeline.max_retry_attempts:
-                result.status = ProcessingStatus.MANUAL_REVIEW
-            else:
-                result.status = ProcessingStatus.LOW_CONFIDENCE
+            result.status = ProcessingStatus.MANUAL_REVIEW
         else:
-            # Both scores are acceptable and all steps completed
             result.status = ProcessingStatus.COMPLETE
         
         # Save to file

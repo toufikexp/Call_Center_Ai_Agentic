@@ -202,8 +202,6 @@ class Settings(BaseModel):
     gemini: GeminiSettings
     qwen: LLMSettings
     vllm: VLLMSettings
-    dziribert_classifier: ModelSettings
-    dziribert_sentiment: ModelSettings
     classification: ClassificationSettings
     pipeline: PipelineSettings
 
@@ -319,18 +317,6 @@ class Settings(BaseModel):
                 model_name=vllm_model_name,
                 api_key=vllm_api_key,
                 temperature=vllm_temperature,
-            ),
-            dziribert_classifier=ModelSettings(
-                model_path="alger-ia/dziribert",
-                max_length=512,
-                device="auto",
-                dtype="float32",
-            ),
-            dziribert_sentiment=ModelSettings(
-                model_path="alger-ia/dziribert_sentiment",
-                max_length=512,
-                device="auto",
-                dtype="float32",
             ),
             classification=ClassificationSettings(
                 **classification_schema

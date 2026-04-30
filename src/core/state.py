@@ -11,7 +11,6 @@ class ProcessingStatus(str, Enum):
     PENDING = "PENDING"
     IN_PROGRESS = "IN_PROGRESS"
     COMPLETE = "COMPLETE"
-    LOW_CONFIDENCE = "LOW_CONFIDENCE"
     MANUAL_REVIEW = "MANUAL_REVIEW"
     ERROR = "ERROR"
 
@@ -21,12 +20,14 @@ class CallAnalysisResult(BaseModel):
     call_id: str = Field(default="", description="Unique call identifier")
     transcript: str = Field(default="", description="Transcribed text")
     refined_transcript: str = Field(default="", description="Refined transcript")
-    confidence_score: float = Field(default=0.0, ge=0.0, le=1.0, description="Confidence score")
+    confidence_score: float = Field(default=0.0, ge=0.0, le=1.0, description="Whisper transcription confidence (mean exp(token logprob))")
     refinement_score: float = Field(default=0.0, ge=0.0, le=1.0, description="Refinement quality score")
-    is_corrected: bool = Field(default=False, description="Whether transcript was corrected")
     subject: str = Field(default="", description="Primary classification category")
     sub_subject: str = Field(default="", description="Sub-category classification")
+    classification_confidence: float = Field(default=0.0, ge=0.0, le=1.0, description="Classifier self-reported confidence")
     satisfaction_score: float = Field(default=0.0, ge=0.0, le=10.0, description="Satisfaction score (0-10 scale, 0 = not analyzed)")
+    sentiment_label: str = Field(default="", description="Sentiment label (POSITIVE, NEUTRAL, NEGATIVE)")
+    sentiment_reasoning: str = Field(default="", description="One-sentence justification for the satisfaction score")
     status: ProcessingStatus = Field(default=ProcessingStatus.PENDING, description="Processing status")
     error_message: Optional[str] = Field(default=None, description="Error message if any")
 
@@ -37,4 +38,3 @@ class PipelineState(TypedDict):
     call_id: str
     run_count: int
     result: CallAnalysisResult
-

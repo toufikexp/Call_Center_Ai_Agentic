@@ -73,9 +73,7 @@ transcribe ──► refine ──► verify
 Performed in `_save_node`:
 1. If already `ERROR`, status is preserved.
 2. Else if `refinement_score < refinement_threshold` → `MANUAL_REVIEW`.
-3. Else if `confidence_score < confidence_threshold`:
-   - and `run_count >= max_retry_attempts` → `MANUAL_REVIEW`
-   - else → `LOW_CONFIDENCE`
+3. Else if `confidence_score < confidence_threshold` → `MANUAL_REVIEW`.
 4. Else → `COMPLETE`.
 
 ## Component boundaries
@@ -152,12 +150,12 @@ Per-stage transformation of `CallAnalysisResult`:
 
 | Stage           | Reads                          | Writes                                                    |
 |-----------------|--------------------------------|-----------------------------------------------------------|
-| transcribe      | `audio_path`                   | `transcript`, `confidence_score`, (`status` on error)     |
-| refine          | `transcript`                   | `refined_transcript`, `refinement_score`                  |
-| verify          | scores                         | `status` → `IN_PROGRESS` (logging only)                   |
-| classify        | `refined_transcript or transcript` | `subject`, `sub_subject`                              |
-| analyze_sentiment | `refined_transcript or transcript` | `satisfaction_score`                                |
-| save_result     | everything                     | final `status`; writes JSON to `data/results/`            |
+| transcribe      | `audio_path`                   | `transcript`, `confidence_score`, (`status` on error)                          |
+| refine          | `transcript`                   | `refined_transcript`, `refinement_score`                                       |
+| verify          | scores                         | `status` → `IN_PROGRESS` (logging only)                                        |
+| classify        | `refined_transcript or transcript` | `subject`, `sub_subject`, `classification_confidence`                      |
+| analyze_sentiment | `refined_transcript or transcript` | `satisfaction_score`, `sentiment_label`, `sentiment_reasoning`           |
+| save_result     | everything                     | final `status`; writes JSON to `data/results/`                                 |
 
 ## External dependencies (runtime)
 

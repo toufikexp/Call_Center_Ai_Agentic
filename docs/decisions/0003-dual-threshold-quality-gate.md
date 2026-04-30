@@ -30,10 +30,12 @@ skipped entirely.
 - **Con:** when Gemini API is unreachable, `refinement_score = 0.0` and *every*
   call routes to `MANUAL_REVIEW`. This is intentional — we'd rather queue for
   review than emit unrefined data.
-- **Con:** the confidence score is a length-based heuristic
-  (`recalculate_confidence`), not a true model log-prob. Threshold value
-  (`0.9`) is calibrated to that heuristic and would need re-tuning if the
-  scorer changed.
+- **Con:** the confidence score is `exp(mean token log-prob)` from a single
+  `model.generate()` pass on the first 30s of audio (see
+  `_compute_confidence` in `transcription.py`). Long calls are scored from a
+  representative sample, not end-to-end. The threshold (`0.9`) was originally
+  calibrated to a length-based heuristic and may want re-tuning now that the
+  signal is real model log-prob.
 
 ## Tuning
 

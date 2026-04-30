@@ -72,17 +72,13 @@ will fail at `initialize()` — update `WhisperSettings.model_path` in
 
 ## Things that look like bugs but aren't
 
-- `CorrectionService` is intentionally disabled in
-  `orchestrator.py:33` (`self.correction_service = None`). The node
-  (`_correct_node`) and the file (`src/services/correction.py`) are kept for
-  future re-enablement. Don't delete them.
-- `dziribert_classifier` / `dziribert_sentiment` settings exist in
-  `Settings` but are not consumed by any active service — legacy from a prior
-  iteration that ran DziriBERT locally before the move to vLLM.
-- `confidence_score` is a heuristic from transcript length
-  (`recalculate_confidence` in `transcription.py`), **not** a real Whisper
-  log-prob. The `confidence_threshold` (default 0.9) is calibrated to that
-  heuristic.
+- `CorrectionService` (`src/services/correction.py`) is not wired into the
+  graph. The file is kept as a reference for a future re-enablement of
+  in-process Qwen correction. Don't delete the file; just leave it.
+- `confidence_score` is a real Whisper signal — `exp(mean token log-prob)`
+  computed by `_compute_confidence` in `transcription.py`. For audio longer
+  than `chunk_length_seconds` (30s) the score is computed on the first chunk
+  only, as a representative sample.
 - Pipeline routes to `MANUAL_REVIEW` whenever Gemini refinement fails OR has
   no API key — that is by design (refinement score 0.0 < 0.5 threshold).
 

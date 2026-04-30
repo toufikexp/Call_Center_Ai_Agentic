@@ -45,10 +45,10 @@ accepts (mp3, wav, m4a, …).
 
 **Output `data` dict:**
 
-| Key          | Type    | Range / domain                          |
-|--------------|---------|-----------------------------------------|
-| `transcript` | `str`   | Possibly empty                           |
-| `confidence` | `float` | 0.0 – 0.95 (heuristic from word count)   |
+| Key          | Type    | Range / domain                                                                 |
+|--------------|---------|--------------------------------------------------------------------------------|
+| `transcript` | `str`   | Possibly empty                                                                  |
+| `confidence` | `float` | 0.0 – 1.0; `exp(mean token log-prob)` from a direct `model.generate()` pass    |
 
 **Side effect:** for audio longer than `chunk_length_seconds` (30s), per-chunk
 WAV files are written to `data/chunks/<basename>_chk<NN>.wav`.
@@ -119,14 +119,18 @@ for the authoritative list. Top-level keys:
 
 **Output `data` dict:**
 
-| Key                  | Type    | Range / domain                                          |
-|----------------------|---------|---------------------------------------------------------|
-| `satisfaction_score` | `float` | 1.0 – 10.0 on success; `0.0` means "not analyzed"       |
+| Key                  | Type    | Range / domain                                              |
+|----------------------|---------|-------------------------------------------------------------|
+| `satisfaction_score` | `float` | 1.0 – 10.0 on success; `0.0` means "not analyzed"           |
+| `sentiment_label`    | `str`   | `POSITIVE`, `NEUTRAL`, `NEGATIVE`, or `""` if not analyzed  |
+| `confidence`         | `float` | 0.0 – 1.0                                                   |
+| `reasoning`          | `str`   | One-sentence justification (or `""` if not analyzed)        |
 
 **Prompt contract (vLLM):** model must reply with JSON
 `{"satisfaction_score": float, "sentiment_label": "POSITIVE|NEUTRAL|NEGATIVE",
-"confidence": float, "reasoning": "..."}`. Only `satisfaction_score` is
-persisted to the final record; the rest is logged.
+"confidence": float, "reasoning": "..."}`. `satisfaction_score`,
+`sentiment_label`, and `reasoning` are persisted in the final record;
+`confidence` is logged only.
 
 ## Final output JSON (`data/results/*.json`)
 
@@ -134,19 +138,21 @@ Schema = `CallAnalysisResult.model_dump()` plus a few injected fields.
 
 | Field                | Type             | Notes                                                                 |
 |----------------------|------------------|-----------------------------------------------------------------------|
-| `call_id`            | `str`            | `call_<basename>_<8-hex>` if not provided                             |
-| `transcript`         | `str`            | Raw Whisper output                                                    |
-| `refined_transcript` | `str`            | Possibly equal to `transcript` if refinement skipped/failed           |
-| `confidence_score`   | `float [0, 1]`   | Heuristic from transcript length                                      |
-| `refinement_score`   | `float [0, 1]`   | From Gemini, or `0.0`                                                 |
-| `is_corrected`       | `bool`           | Always `false` (correction stage disabled)                            |
-| `subject`            | `str`            | Taxonomy category or `"OTHER"` / `"UNKNOWN"`                          |
-| `sub_subject`        | `str`            | Sub-category or `"N/A"`                                               |
-| `satisfaction_score` | `float [0, 10]`  | `0.0` means not analyzed                                              |
-| `status`             | `str`            | One of: `PENDING`, `IN_PROGRESS`, `COMPLETE`, `LOW_CONFIDENCE`, `MANUAL_REVIEW`, `ERROR` |
-| `error_message`      | `str \| null`    | Set when `status == ERROR`                                            |
-| `audio_path`         | `str`            | Injected in `_save_node`                                              |
-| `run_count`          | `int`            | Injected in `_save_node` (always 1 today)                             |
+| `call_id`                   | `str`            | `call_<basename>_<8-hex>` if not provided                             |
+| `transcript`                | `str`            | Raw Whisper output                                                    |
+| `refined_transcript`        | `str`            | Possibly equal to `transcript` if refinement skipped/failed           |
+| `confidence_score`          | `float [0, 1]`   | `exp(mean token log-prob)` from Whisper                               |
+| `refinement_score`          | `float [0, 1]`   | From Gemini, or `0.0`                                                 |
+| `subject`                   | `str`            | Taxonomy category or `"OTHER"` / `"UNKNOWN"`                          |
+| `sub_subject`               | `str`            | Sub-category or `"N/A"`                                               |
+| `classification_confidence` | `float [0, 1]`   | Classifier self-reported confidence                                   |
+| `satisfaction_score`        | `float [0, 10]`  | `0.0` means not analyzed                                              |
+| `sentiment_label`           | `str`            | `POSITIVE` / `NEUTRAL` / `NEGATIVE` / `""`                            |
+| `sentiment_reasoning`       | `str`            | One-sentence justification, or `""`                                   |
+| `status`                    | `str`            | One of: `PENDING`, `IN_PROGRESS`, `COMPLETE`, `MANUAL_REVIEW`, `ERROR` |
+| `error_message`             | `str \| null`    | Set when `status == ERROR`                                            |
+| `audio_path`                | `str`            | Injected in `_save_node`                                              |
+| `run_count`                 | `int`            | Injected in `_save_node` (always 1 today)                             |
 
 ### Example: COMPLETE
 
@@ -157,10 +163,12 @@ Schema = `CallAnalysisResult.model_dump()` plus a few injected fields.
   "refined_transcript": "[Agent] ... [Subscriber] ...",
   "confidence_score": 0.92,
   "refinement_score": 0.85,
-  "is_corrected": false,
   "subject": "Network",
   "sub_subject": "Network_Reception/Coverage",
+  "classification_confidence": 0.95,
   "satisfaction_score": 7.5,
+  "sentiment_label": "POSITIVE",
+  "sentiment_reasoning": "Customer thanked the agent and the issue was resolved.",
   "status": "COMPLETE",
   "error_message": null,
   "audio_path": "data/audio_files/399001002190034.mp3",
@@ -177,10 +185,12 @@ Schema = `CallAnalysisResult.model_dump()` plus a few injected fields.
   "refined_transcript": "...",
   "confidence_score": 0.95,
   "refinement_score": 0.0,
-  "is_corrected": false,
   "subject": "",
   "sub_subject": "",
+  "classification_confidence": 0.0,
   "satisfaction_score": 0.0,
+  "sentiment_label": "",
+  "sentiment_reasoning": "",
   "status": "MANUAL_REVIEW",
   "error_message": null,
   "audio_path": "...",
@@ -197,10 +207,12 @@ Schema = `CallAnalysisResult.model_dump()` plus a few injected fields.
   "refined_transcript": "",
   "confidence_score": 0.0,
   "refinement_score": 0.0,
-  "is_corrected": false,
   "subject": "",
   "sub_subject": "",
+  "classification_confidence": 0.0,
   "satisfaction_score": 0.0,
+  "sentiment_label": "",
+  "sentiment_reasoning": "",
   "status": "ERROR",
   "error_message": "Audio file not found: ...",
   "audio_path": "...",
@@ -222,20 +234,12 @@ Schema = `CallAnalysisResult.model_dump()` plus a few injected fields.
                  │ IN_PROGRESS │
                  └──────┬──────┘
                         │
-       ┌────────────────┼────────────────┬────────────────┐
-       │                │                │                │
-   any error       low refinement    low confidence   all gates pass
-       │                │                │                │
-       ▼                ▼                ▼                ▼
-   ┌───────┐     ┌───────────────┐  ┌─────────────────┐  ┌──────────┐
-   │ ERROR │     │ MANUAL_REVIEW │  │ LOW_CONFIDENCE  │  │ COMPLETE │
-   └───────┘     └───────────────┘  └─────────────────┘  └──────────┘
-                                          │
-                                  (today: rolls into
-                                   MANUAL_REVIEW once
-                                   run_count >= max_retry_attempts)
+       ┌────────────────┼─────────────────────────────────┐
+       │                │                                 │
+   any error       low refinement OR low confidence    all gates pass
+       │                │                                 │
+       ▼                ▼                                 ▼
+   ┌───────┐     ┌───────────────┐                   ┌──────────┐
+   │ ERROR │     │ MANUAL_REVIEW │                   │ COMPLETE │
+   └───────┘     └───────────────┘                   └──────────┘
 ```
-
-`LOW_CONFIDENCE` is currently a transient label kept for backward
-compatibility — without an enabled correction step, runs end as
-`MANUAL_REVIEW` whenever confidence is too low.

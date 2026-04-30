@@ -95,7 +95,12 @@ JSON Output:"""
             
             if not self._api_configured or self._client is None:
                 self.logger.warning("vLLM API not configured. Using fallback sentiment analysis.")
-                return {"satisfaction_score": 0.0}
+                return {
+                    "satisfaction_score": 0.0,
+                    "sentiment_label": "",
+                    "confidence": 0.0,
+                    "reasoning": "",
+                }
             
             sentiment_label = "N/A"
             confidence = 0.0
@@ -146,9 +151,11 @@ JSON Output:"""
                 if sentiment_label.upper() not in valid_labels:
                     self.logger.warning(
                         f"vLLM returned invalid sentiment label '{sentiment_label}'. "
-                        f"Valid labels: {valid_labels}. Using 'N/A'."
+                        f"Valid labels: {valid_labels}. Using ''."
                     )
-                    sentiment_label = "N/A"
+                    sentiment_label = ""
+                else:
+                    sentiment_label = sentiment_label.upper()
                 
                 # Log sentiment results
                 self.logger.info("=" * 60)
@@ -160,8 +167,13 @@ JSON Output:"""
                 if reasoning != "N/A":
                     self.logger.info(f"Reasoning: {reasoning}")
                 self.logger.info("=" * 60)
-                
-                return {"satisfaction_score": float(satisfaction)}
+
+                return {
+                    "satisfaction_score": float(satisfaction),
+                    "sentiment_label": sentiment_label,
+                    "confidence": float(confidence),
+                    "reasoning": reasoning,
+                }
                 
             except json.JSONDecodeError as e:
                 self.logger.error(f"Failed to parse vLLM sentiment response as JSON: {e}")

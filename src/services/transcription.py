@@ -1,3 +1,4 @@
+import math
 import os
 import time
 import threading
@@ -320,9 +321,11 @@ class TranscriptionService(BaseService):
                     self.logger.info("(Empty transcript)")
                 self.logger.info("=" * 60)
                 
+                confidence = self._compute_confidence(audio_array)
+
                 return {
                     "transcript": full_text,
-                    "confidence": self.recalculate_confidence(full_text)
+                    "confidence": confidence,
                 }
             except Exception as e:
                 # Stop progress indicator on error
@@ -332,11 +335,83 @@ class TranscriptionService(BaseService):
                 raise
 
         return self._execute_with_timing(_execute)
-    
-    
-    def recalculate_confidence(self, transcript: str) -> float:
-        """Recalculate confidence for a transcript."""
-        words = transcript.split()
-        if not words:
+
+    def _compute_confidence(self, audio_array, sample_rate: int = 16000) -> float:
+        """
+        Real Whisper confidence from token log-probs.
+
+        Runs an extra `model.generate(..., output_scores=True)` pass on the
+        audio (first `chunk_length_seconds` for long-form input), computes
+        the mean log-prob of the chosen tokens, and maps it to [0, 1] via
+        `exp(mean_log_prob)`.
+
+        Returns 0.0 if the empty model output prevents scoring (e.g. silence).
+        """
+        if audio_array is None or len(audio_array) == 0:
             return 0.0
-        return min(0.95, 0.70 + (len(words) / 100.0) * 0.25)
+
+        # Score the first chunk_length_seconds as a representative sample.
+        # Whisper's encoder operates on 30-second windows; longer inputs
+        # would either need long-form generation (slow) or chunk averaging.
+        max_samples = int(self.settings.chunk_length_seconds * sample_rate)
+        sample = audio_array[:max_samples]
+
+        try:
+            features = self._pipe.feature_extractor(
+                sample,
+                sampling_rate=sample_rate,
+                return_tensors="pt",
+            ).input_features
+
+            model = self._pipe.model
+            device = next(model.parameters()).device
+            dtype = next(model.parameters()).dtype
+            features = features.to(device=device, dtype=dtype)
+
+            generate_kwargs = {
+                "task": self.settings.task,
+                "max_new_tokens": self.settings.max_new_tokens,
+                "return_dict_in_generate": True,
+                "output_scores": True,
+                "do_sample": False,
+                "num_beams": 1,
+                "repetition_penalty": 1.2,
+                "no_repeat_ngram_size": 4,
+            }
+            if self.settings.language:
+                generate_kwargs["language"] = self.settings.language
+
+            with torch.no_grad():
+                output = model.generate(features, **generate_kwargs)
+
+            scores = getattr(output, "scores", None)
+            if not scores:
+                return 0.0
+
+            # scores: tuple of [batch, vocab] tensors, one per generated step
+            stacked = torch.stack(scores, dim=1).float()        # [B, T, V]
+            log_probs = torch.log_softmax(stacked, dim=-1)
+            gen_len = stacked.size(1)
+            gen_ids = output.sequences[:, -gen_len:]
+            token_logprobs = log_probs.gather(2, gen_ids.unsqueeze(-1)).squeeze(-1)  # [B, T]
+
+            # Mask out EOS / pad tokens so trailing junk doesn't drag the score.
+            tokenizer = self._pipe.tokenizer
+            eos_id = getattr(tokenizer, "eos_token_id", None)
+            pad_id = getattr(tokenizer, "pad_token_id", None)
+            mask = torch.ones_like(gen_ids, dtype=torch.bool)
+            if eos_id is not None:
+                mask &= gen_ids != eos_id
+            if pad_id is not None:
+                mask &= gen_ids != pad_id
+
+            if mask.any():
+                avg_logprob = (token_logprobs * mask).sum() / mask.sum()
+            else:
+                avg_logprob = token_logprobs.mean()
+
+            confidence = math.exp(float(avg_logprob.item()))
+            return max(0.0, min(1.0, confidence))
+        except Exception as e:
+            self.logger.warning(f"Confidence scoring failed: {e}. Returning 0.0.")
+            return 0.0

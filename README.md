@@ -233,12 +233,14 @@ Results are saved as JSON files in `data/results/`:
   "call_id": "call_audio_abc123",
   "transcript": "Original transcription text...",
   "refined_transcript": "Refined transcription with speaker labels...",
-  "confidence_score": 0.95,
+  "confidence_score": 0.92,
   "refinement_score": 0.85,
-  "is_corrected": false,
   "subject": "COMPLAINT",
   "sub_subject": "Network Coverage",
+  "classification_confidence": 0.95,
   "satisfaction_score": 7.5,
+  "sentiment_label": "POSITIVE",
+  "sentiment_reasoning": "Customer thanked the agent and the issue was resolved.",
   "status": "COMPLETE",
   "audio_path": "/path/to/audio.mp3",
   "run_count": 1,
@@ -250,11 +252,14 @@ Results are saved as JSON files in `data/results/`:
 
 - `transcript`: Original transcription from Whisper
 - `refined_transcript`: Refined transcript with speaker labels and corrections
-- `confidence_score`: Transcription confidence (0.0-1.0)
+- `confidence_score`: Transcription confidence — `exp(mean token log-prob)` from Whisper (0.0-1.0)
 - `refinement_score`: Refinement quality score (0.0-1.0), indicates transcript coherence and meaning
 - `subject`: Primary classification category
 - `sub_subject`: Sub-category classification (or "N/A")
+- `classification_confidence`: Classifier self-reported confidence (0.0-1.0)
 - `satisfaction_score`: Customer satisfaction score (0-10, where 0 = not analyzed)
+- `sentiment_label`: Sentiment label — POSITIVE, NEUTRAL, or NEGATIVE (empty when not analyzed)
+- `sentiment_reasoning`: One-sentence justification for the satisfaction score
 - `status`: Processing status (see Status Values section below)
 
 ## 📋 Status Values
@@ -265,7 +270,6 @@ The pipeline uses the following status values:
 - **IN_PROGRESS**: Currently being processed
 - **COMPLETE**: Successfully processed through all steps
 - **MANUAL_REVIEW**: Routed to manual review due to low quality scores
-- **LOW_CONFIDENCE**: Low transcription confidence (legacy, currently routes to MANUAL_REVIEW)
 - **ERROR**: Error occurred during processing
 
 ## 🎨 Service Architecture
@@ -292,7 +296,8 @@ Each service:
 **TranscriptionService** (`transcription.py`):
 - Uses fine-tuned Whisper model for Arabic/Darija transcription
 - Supports automatic chunking for long audio files
-- Calculates confidence scores based on transcript length
+- Confidence is `exp(mean token log-prob)` from a direct `model.generate()`
+  pass with `output_scores=True` on the first 30s of audio
 
 **RefinementService** (`refinement.py`):
 - Uses Gemini API (`gemini-2.0-flash-exp`) for transcript refinement

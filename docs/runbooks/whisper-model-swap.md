@@ -41,11 +41,12 @@ checkpoints are commented in that file as a quick-switch reference.
 
 ## Calibration
 
-The `confidence_score` is a length-based heuristic
-(`recalculate_confidence`), not a real model score. After swapping models,
-spot-check whether the same threshold (`0.9`) still makes sense for the
-language and audio quality you process. If it's now systematically gating too
-many calls, see `docs/runbooks/threshold-tuning.md`.
+The `confidence_score` is `exp(mean token log-prob)` from a direct
+`model.generate(..., output_scores=True)` pass — a real Whisper signal. After
+swapping models, the score distribution can shift: a different checkpoint may
+produce systematically higher or lower log-probs on the same audio. Spot-check
+whether the threshold (`0.9`) still makes sense; tune via
+`docs/runbooks/threshold-tuning.md` if needed.
 
 ## Rollback
 

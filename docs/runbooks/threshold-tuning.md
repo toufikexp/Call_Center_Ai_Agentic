@@ -5,7 +5,7 @@ diverted to manual review:
 
 | Setting                                | Default | What it gates on                                  |
 |----------------------------------------|---------|---------------------------------------------------|
-| `PipelineSettings.confidence_threshold` | `0.90`  | Whisper transcription "confidence" (heuristic)    |
+| `PipelineSettings.confidence_threshold` | `0.90`  | Whisper `exp(mean token log-prob)`                |
 | `PipelineSettings.refinement_threshold` | `0.50`  | Gemini refinement quality score                   |
 
 Both live in `src/config/config.py`.
@@ -67,8 +67,9 @@ Look at the median and p25:
 ## Notes
 
 - The two thresholds are independent: a call must pass *both* to proceed.
-- `confidence_score` is **not** a true Whisper log-prob — it's a function of
-  transcript word count (`recalculate_confidence` in
-  `src/services/transcription.py`). Tuning it is calibration, not statistics.
+- `confidence_score` is `exp(mean token log-prob)` from
+  `_compute_confidence` in `src/services/transcription.py`. The score is
+  computed from the **first 30 seconds** of the audio (the Whisper window
+  size), as a representative sample for long-form input.
 - `refinement_score` comes directly from the Gemini model. If you change the
   refinement prompt, the score distribution can shift abruptly.
