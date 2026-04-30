@@ -11,7 +11,7 @@ Environment Variables:
 import sys
 import os
 from src.pipeline import CallAnalysisPipeline
-from src.core.config import get_settings, set_settings, Settings
+from src.config.config import get_settings, set_settings, Settings
 
 
 def main():

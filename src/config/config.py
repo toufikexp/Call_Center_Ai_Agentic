@@ -286,7 +286,13 @@ class Settings(BaseModel):
 
         return cls(
             whisper=WhisperSettings(
-                model_path="/home/zerrougt/Call_Center_Ai_Agentic/models/whisper_dz_asr_large_chk750",
+                # model_path="/home/zerrougt/Call_Center_Ai_Agentic/models/whisper_dz_asr",
+                # model_path="MohammedNasri/whisper-algerian-dialect",
+                # model_path="/home/zerrougt/UBC_NLP_Casablanca/whisper_large_gemini/checkpoint-500",
+                model_path="/home/zerrougt/UBC_NLP_Casablanca/whisper_large_gemini_fixed/checkpoint-250",
+                # model_path="/home/zerrougt/UBC_NLP_Casablanca/whisper_large_deepseek/phase1_complete/",
+                # model_path="openai/whisper-large-v3",
+                #model_path="/home/zerrougt/UBC_NLP_Casablanca/whisper_large_v3_gemini",
                 max_length=448,
                 max_new_tokens=444,
                 language="ar",

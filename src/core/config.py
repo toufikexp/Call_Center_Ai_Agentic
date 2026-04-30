@@ -1,15 +1,12 @@
 """
-Compatibility wrapper for configuration.
+Compatibility wrapper for config imports.
 
-The real configuration now lives in `src/config/config.py`. This module simply
-re-exports the same API so existing imports like:
+This module re-exports configuration from src.config.config to maintain
+backward compatibility with existing imports (from src.core.config ...).
 
-    from src.core.config import get_settings, WhisperSettings
-
-continue to work without code changes.
+The actual configuration implementation is in src.config.config.
 """
-
-from src.config.config import (  # type: ignore
+from src.config.config import (
     ModelSettings,
     WhisperSettings,
     LLMSettings,
@@ -22,3 +19,17 @@ from src.config.config import (  # type: ignore
     get_settings,
     set_settings,
 )
+
+__all__ = [
+    "ModelSettings",
+    "WhisperSettings",
+    "LLMSettings",
+    "GeminiSettings",
+    "VLLMSettings",
+    "ClassificationSettings",
+    "PipelineSettings",
+    "Settings",
+    "load_env_file",
+    "get_settings",
+    "set_settings",
+]

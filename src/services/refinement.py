@@ -67,7 +67,7 @@ class RefinementService(BaseService):
                             contents=prompt,
                             config={'response_mime_type': 'application/json'}
                         )
-                        
+                
                         # Get text from the new response object
                         raw_text = response.text
                         
@@ -113,7 +113,7 @@ class RefinementService(BaseService):
             self.logger.info(f"Original: {transcript[:100]}...")
             self.logger.info(f"Refined:  {refined_text[:100]}...")
             self.logger.info("=" * 60)
-            
+                
             return {"refined_transcript": refined_text, "refinement_score": score}
         
         return self._execute_with_timing(_refine)

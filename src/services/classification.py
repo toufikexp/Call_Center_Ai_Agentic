@@ -142,7 +142,7 @@ JSON Output:"""
         
         Args:
             transcript: Transcript to classify
-            
+        
         Returns:
             ServiceResult with subject and sub_subject
         """
@@ -160,7 +160,7 @@ JSON Output:"""
             try:
                 # Build classification prompt
                 prompt = self._build_classification_prompt(transcript)
-                
+            
                 # Call vLLM API using OpenAI-compatible interface
                 response = self._client.chat.completions.create(
                     model=self.vllm_settings.model_name,  # Must match the model name in Docker
@@ -170,14 +170,14 @@ JSON Output:"""
                     ],
                     temperature=self.vllm_settings.temperature  # Lower temperature for better classification accuracy
                 )
-                
+            
                 # Extract response text
                 raw_text = response.choices[0].message.content
                 
                 # Clean and parse JSON response
                 clean_json = raw_text.replace("```json", "").replace("```", "").strip()
                 data = json.loads(clean_json)
-                
+            
                 # Extract classification results
                 predicted_subject = data.get("subject", "").strip()
                 predicted_sub_subject = data.get("sub_subject", "N/A").strip()
@@ -203,7 +203,7 @@ JSON Output:"""
                     predicted_subject,
                     ["N/A"]
                 )
-                
+            
                 # Normalize sub-category for flexible matching (handle spaces around dashes)
                 def normalize_subcat(subcat: str) -> str:
                     """Normalize sub-category by removing extra spaces around dashes."""

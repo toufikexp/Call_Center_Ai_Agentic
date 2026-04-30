@@ -1,6 +1,11 @@
 cc_agentic_env/
 __pycache__/
 *.pyc
+.env
+.cursor/
+.vscode/
+push_manual.sh
+push_with_credentials.sh
 
 # Data directories (keep structure, exclude contents)
 data/audio_files/*
