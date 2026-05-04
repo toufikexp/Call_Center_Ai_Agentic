@@ -40,26 +40,34 @@ class PreprocessingService(BaseService):
         self._get_speech_timestamps = None
 
     def initialize(self) -> None:
-        """Load Silero VAD via torch.hub (cached after first run)."""
+        """Load Silero VAD from the bundled `silero-vad` pip package.
+
+        We deliberately avoid `torch.hub.load(...)` — even with a populated
+        cache it does a GitHub HEAD call to check for updates, which adds
+        ~2 minutes when the network is unreachable. The `silero-vad` pip
+        package ships the model weights inside the wheel, so this load is
+        purely local and offline-safe.
+        """
         if self._initialized:
             return
 
-        import torch  # imported lazily to keep service construction cheap
-
         if self.settings.silero_cache_dir:
+            # Honoured for backwards compat — only matters if a future
+            # change re-enables `torch.hub` for some reason.
+            import torch  # local import to keep service construction cheap
             torch.hub.set_dir(self.settings.silero_cache_dir)
 
-        self.logger.info("Loading Silero VAD model...")
-        model, utils = torch.hub.load(
-            repo_or_dir="snakers4/silero-vad",
-            model="silero_vad",
-            force_reload=False,
-            trust_repo=True,
-        )
-        # `utils` is (get_speech_timestamps, save_audio, read_audio,
-        # VADIterator, collect_chunks). We only need the first.
-        self._get_speech_timestamps = utils[0]
-        self._vad_model = model
+        self.logger.info("Loading Silero VAD model (silero-vad package)...")
+        try:
+            from silero_vad import load_silero_vad, get_speech_timestamps
+        except ImportError as e:
+            raise RuntimeError(
+                "silero-vad package is required. Install with: "
+                "pip install silero-vad"
+            ) from e
+
+        self._vad_model = load_silero_vad()
+        self._get_speech_timestamps = get_speech_timestamps
         self._initialized = True
         self.logger.info("✅ Silero VAD loaded")
 
