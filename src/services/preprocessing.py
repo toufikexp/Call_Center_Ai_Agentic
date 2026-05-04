@@ -128,10 +128,9 @@ class PreprocessingService(BaseService):
         channel. Anything beyond stereo is reduced to the configured agent
         and client channel indices.
         """
-        import soundfile as sf
         import librosa
 
-        audio, sr = sf.read(audio_path, always_2d=True, dtype="float32")
+        audio, sr = self._safe_load_multichannel(audio_path)
         # `audio` shape: (num_samples, num_channels)
         num_channels = audio.shape[1]
 
@@ -157,6 +156,36 @@ class PreprocessingService(BaseService):
         agent = _resample(audio[:, agent_idx])
         client = _resample(audio[:, client_idx])
         return [("agent", agent), ("client", client)]
+
+    def _safe_load_multichannel(self, audio_path: str) -> Tuple[np.ndarray, int]:
+        """Load audio as (num_samples, num_channels) at native sample rate.
+
+        Tries `soundfile` first (fast, exact for clean WAV/FLAC). On any
+        failure falls back to `librosa.load(..., mono=False)` which uses
+        audioread / ffmpeg under the hood — much more permissive about
+        malformed WAV headers, mp3, m4a, etc.
+        """
+        import soundfile as sf
+
+        try:
+            audio, sr = sf.read(audio_path, always_2d=True, dtype="float32")
+            return audio, int(sr)
+        except Exception as e:
+            self.logger.warning(
+                f"soundfile could not open {os.path.basename(audio_path)} "
+                f"({e}); falling back to librosa+audioread"
+            )
+
+        import librosa
+
+        audio, sr = librosa.load(audio_path, sr=None, mono=False)
+        # librosa returns (num_samples,) for mono and (num_channels, num_samples)
+        # for multi-channel. Normalise to (num_samples, num_channels).
+        if audio.ndim == 1:
+            audio = audio[:, np.newaxis]
+        else:
+            audio = audio.T
+        return audio.astype(np.float32, copy=False), int(sr)
 
     # ------------------------------------------------------------------
     # VAD
