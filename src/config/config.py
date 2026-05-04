@@ -153,7 +153,10 @@ class GeminiSettings(BaseModel):
     """Settings for Gemini API (temporary)."""
 
     api_key: Optional[str] = None
-    model_name: str = "gemini-2.0-flash-exp"
+    # Stable Gemini model. The previous default `gemini-2.0-flash-exp` was the
+    # experimental preview name and has been removed by Google. Override with
+    # `GEMINI_MODEL_NAME` in `.env` to use a different model.
+    model_name: str = "gemini-2.0-flash"
     timeout_seconds: int = 15
     min_refinement_length_ratio: float = 0.3
     default_refinement_score: float = 0.7
@@ -419,7 +422,9 @@ class Settings(BaseModel):
             ),
             gemini=GeminiSettings(
                 api_key=gemini_key,
-                model_name="gemini-2.0-flash-exp",
+                model_name=os.getenv(
+                    "GEMINI_MODEL_NAME", GeminiSettings.model_fields["model_name"].default
+                ),
             ),
             qwen=LLMSettings(
                 model_path="Qwen/Qwen-7B-Chat",
