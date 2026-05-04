@@ -19,39 +19,65 @@ PostgreSQL. JSON output under `data/results/` is unaffected either way.
 
 ## One-time setup
 
-1. Install the driver (already pinned in `requirements.txt`):
+There are two responsibilities, split the way most production deployments
+expect:
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+| Responsibility            | Done by                                         | When               |
+|---------------------------|-------------------------------------------------|--------------------|
+| Install PostgreSQL server | OS / sysadmin / image                           | once per host      |
+| Create role + database    | `scripts/setup_postgres.sh` (or your IaC)       | once per environment |
+| Create tables + indexes   | The pipeline (`CREATE TABLE IF NOT EXISTS`)     | first pipeline run |
+| Schema migrations         | Manual `ALTER TABLE` (or Alembic later)         | when schema changes |
 
-2. Make sure a PostgreSQL server is reachable. Local install (Linux):
+### Production / repeatable
 
-   ```bash
-   sudo apt-get install -y postgresql
-   sudo systemctl start postgresql
-   ```
+Use the bundled provisioning script. It is idempotent — safe to re-run from
+CI/CD, Ansible, a container init, or a post-install hook:
 
-3. Create a role and a database:
+```bash
+PG_SUPERUSER=postgres                        \
+PG_HOST=localhost                            \
+PG_PORT=5432                                 \
+APP_DB_NAME=call_center                      \
+APP_DB_USER=cc_pipeline                      \
+APP_DB_PASSWORD='change_me'                  \
+    sudo -E -u postgres ./scripts/setup_postgres.sh
+```
 
-   ```bash
-   sudo -u postgres psql <<'SQL'
-   CREATE USER cc_pipeline WITH PASSWORD 'change_me';
-   CREATE DATABASE call_center OWNER cc_pipeline;
-   GRANT ALL PRIVILEGES ON DATABASE call_center TO cc_pipeline;
-   SQL
-   ```
+What it does:
 
-4. Set `DATABASE_URL` in `.env`:
+- Creates the `cc_pipeline` role if missing; otherwise re-applies the password.
+- Creates the `call_center` database with `cc_pipeline` as owner if missing.
+- Grants schema-level privileges so the application can `CREATE TABLE` under
+  its own user (no superuser needed at runtime).
+- Does **not** drop anything; safe on an already-provisioned database.
 
-   ```bash
-   DATABASE_URL=postgresql://cc_pipeline:change_me@localhost:5432/call_center
-   STORAGE_ENABLE=1
-   ```
+After the script finishes, set `.env` and run the pipeline once. Tables
+appear automatically:
 
-5. Run the pipeline once. Tables are created automatically the first time
-   `ResultsStore` initializes (`CREATE TABLE IF NOT EXISTS`). You should see
-   `✅ ResultsStore ready (PostgreSQL)` in the logs.
+```bash
+echo "STORAGE_ENABLE=1" >> .env
+echo "DATABASE_URL=postgresql://cc_pipeline:change_me@localhost:5432/call_center" >> .env
+python main.py data/audio_files/<one-file>.wav
+
+# Verify
+PGPASSWORD=change_me psql -h localhost -U cc_pipeline -d call_center -c "\dt"
+# Expect: calls, call_results, batch_runs
+```
+
+### Manual / dev-laptop equivalent
+
+If you don't want to run the script (one-off dev setup):
+
+```bash
+sudo -u postgres psql <<'SQL'
+CREATE USER cc_pipeline WITH PASSWORD 'change_me';
+CREATE DATABASE call_center OWNER cc_pipeline;
+GRANT ALL PRIVILEGES ON DATABASE call_center TO cc_pipeline;
+SQL
+```
+
+Then `.env` and pipeline run as above.
 
 ## Schema
 
