@@ -43,6 +43,7 @@ in `data/chunks/`.
 | LoRA adapter (optional) | Fine-tune on top of base | `WHISPER_ADAPTER_PATH` — when unset, `WHISPER_MODEL_PATH` is loaded as a full merged checkpoint |
 | Gemini API | Refinement (cloud) | `gemini-2.0-flash-exp` via `google-genai` |
 | vLLM server | Classification + sentiment | `http://localhost:8080/v1`, model `Qwen/Qwen3-4B` |
+| PostgreSQL (optional) | Analytics + idempotency for batch | enabled via `STORAGE_ENABLE=1` + `DATABASE_URL=postgresql://...`; see `docs/runbooks/storage.md` |
 
 If neither the base model nor the adapter is loadable, transcription fails at
 `initialize()`. If the adapter's `base_model_name_or_path` doesn't match

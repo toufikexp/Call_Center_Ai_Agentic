@@ -184,6 +184,19 @@ data/
 models/             # local checkpoints / adapters (gitignored)
 ```
 
+## Optional persistence (PostgreSQL)
+
+When `STORAGE_ENABLE=1` and a `DATABASE_URL` are set, every call recorded
+under `data/results/` is also written to PostgreSQL by `ResultsStore`
+(`src/storage/results_store.py`). JSON remains the source of truth; the
+DB exists for analytics, idempotency, batch lifecycle tracking, and
+multi-worker safety. See `docs/runbooks/storage.md` for setup and queries.
+
+```
+src/storage/
+└── results_store.py     # PostgreSQL-backed (psycopg v3); opt-in via STORAGE_ENABLE
+```
+
 ## Performance / scaling notes
 
 - Single-call, single-process design. No batching, no queue, no retries beyond

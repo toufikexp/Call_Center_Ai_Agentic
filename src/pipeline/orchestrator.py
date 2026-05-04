@@ -6,6 +6,7 @@ import uuid
 import json
 import time
 import logging
+from datetime import datetime, timezone
 from typing import Optional
 from langgraph.graph import StateGraph, END
 
@@ -24,7 +25,7 @@ class CallAnalysisPipeline:
     def __init__(self, settings: Optional[Settings] = None):
         self.settings = settings or get_settings()
         self.logger = self._create_logger()
-        
+
         # Initialize services
         self.preprocessing_service = PreprocessingService(self.settings.preprocessing)
         self.transcription_service = TranscriptionService(self.settings.whisper)
@@ -34,9 +35,49 @@ class CallAnalysisPipeline:
             self.settings.classification
         )
         self.sentiment_service = SentimentService(self.settings.vllm)
-        
+
+        # Optional persistence layer. Failures here never block the pipeline:
+        # JSON output under data/results/ remains the durable per-call artifact.
+        self._results_store = None
+        self._current_batch_id: Optional[str] = None
+        if self.settings.storage.enable:
+            try:
+                from src.storage import ResultsStore  # lazy import — psycopg only required when used
+                self._results_store = ResultsStore(self.settings.storage.database_url)
+            except Exception as e:
+                self.logger.warning(
+                    f"Results storage disabled (init failed): {e}. "
+                    f"JSON output under {self.settings.pipeline.output_dir} is unaffected."
+                )
+
         # Build graph
         self.graph = self._build_graph()
+
+    # ------------------------------------------------------------------
+    # Batch lifecycle (optional, only meaningful when storage is enabled)
+    # ------------------------------------------------------------------
+    def start_batch(
+        self,
+        file_count: Optional[int] = None,
+        notes: Optional[str] = None,
+    ) -> Optional[str]:
+        """Begin a batch context. Subsequent run() calls record into this
+        batch. Returns the batch_id, or None when storage is disabled."""
+        if not self._results_store:
+            return None
+        batch_id = str(uuid.uuid4())
+        self._results_store.start_batch(batch_id, file_count=file_count, notes=notes)
+        self._current_batch_id = batch_id
+        self.logger.info(f"📦 Batch started: {batch_id}")
+        return batch_id
+
+    def finish_batch(self) -> None:
+        """Stamp the current batch as finished and aggregate counts."""
+        if not self._results_store or not self._current_batch_id:
+            return
+        self._results_store.finish_batch(self._current_batch_id)
+        self.logger.info(f"📦 Batch finished: {self._current_batch_id}")
+        self._current_batch_id = None
     
     def _create_logger(self) -> logging.Logger:
         """Create logger for the pipeline."""
@@ -399,14 +440,30 @@ class CallAnalysisPipeline:
                 satisfaction_score=0.0  # Default value (not analyzed)
             )
         }
-        
+
         # Run pipeline
+        started_at = datetime.now(timezone.utc)
         start_time = time.time()
         final_state = self.graph.invoke(initial_state)
         duration = time.time() - start_time
-        
+        finished_at = datetime.now(timezone.utc)
+
         self.logger.info("")
         self.logger.info(f"✅ Pipeline completed in {duration:.2f}s")
-        
+
+        # Persist to PostgreSQL when storage is enabled. JSON output under
+        # data/results/ has already been written by _save_node and stays as
+        # the source of truth for replay. DB problems are logged inside the
+        # store and never raise.
+        if self._results_store:
+            self._results_store.record_attempt(
+                call_id=final_state["result"].call_id,
+                audio_path=audio_path,
+                result=final_state["result"],
+                batch_id=self._current_batch_id,
+                started_at=started_at,
+                finished_at=finished_at,
+            )
+
         return final_state
 

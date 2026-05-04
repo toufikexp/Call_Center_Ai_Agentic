@@ -237,6 +237,22 @@ class PipelineSettings(BaseModel):
     enable_file_logging: bool = True
 
 
+class StorageSettings(BaseModel):
+    """Settings for the persistence layer (PostgreSQL).
+
+    The store is opt-in. When `enable=False`, the orchestrator does not
+    construct a ResultsStore at all — JSON output under `data/results/`
+    remains the only durable artifact. When `enable=True`, every pipeline
+    run is also persisted to PostgreSQL alongside the JSON.
+    """
+
+    enable: bool = False
+    # SQLAlchemy-style URL. Example: postgresql://user:pass@localhost:5432/call_center
+    # Required when `enable=True`. No default — DB credentials should not be
+    # baked into code.
+    database_url: str = ""
+
+
 class Settings(BaseModel):
     """Main application settings."""
 
@@ -247,6 +263,7 @@ class Settings(BaseModel):
     vllm: VLLMSettings
     classification: ClassificationSettings
     pipeline: PipelineSettings
+    storage: StorageSettings
 
     @staticmethod
     def _load_classification_schema(path: Optional[str] = None) -> Dict[str, Any]:
@@ -446,6 +463,10 @@ class Settings(BaseModel):
             if classification_schema
             else ClassificationSettings(),
             pipeline=PipelineSettings(),
+            storage=StorageSettings(
+                enable=_bool_env("STORAGE_ENABLE", False),
+                database_url=os.getenv("DATABASE_URL", ""),
+            ),
         )
 
 

@@ -49,3 +49,8 @@ google-genai
 # The `silero-vad` package is optional but pins the model and helpers if you
 # prefer to install rather than rely on torch.hub.
 silero-vad>=4.0
+
+# --- Persistence layer (optional, only required when STORAGE_ENABLE=1) ---
+# PostgreSQL driver for the ResultsStore. The `[binary]` extra installs
+# prebuilt wheels — no system libpq required.
+psycopg[binary]>=3.1
