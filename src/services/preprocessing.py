@@ -18,6 +18,7 @@ The service does NOT modify the raw input file. Optional debug WAV dumps are
 written under `data/segments/<basename>/` when `save_segments=True`.
 """
 import os
+import threading
 from pathlib import Path
 from typing import List, Optional, Tuple
 
@@ -38,6 +39,11 @@ class PreprocessingService(BaseService):
         self.settings = settings or get_settings().preprocessing
         self._vad_model = None
         self._get_speech_timestamps = None
+        # Silero VAD is stateful (LSTM hidden state); concurrent inference on
+        # the same model instance segfaults under threads. Serialise model
+        # calls; the rest of the work (audio load, post-processing, file
+        # writes) still overlaps across workers.
+        self._vad_lock = threading.Lock()
 
     def initialize(self) -> None:
         """Load Silero VAD from the bundled `silero-vad` pip package.
@@ -211,12 +217,16 @@ class PreprocessingService(BaseService):
 
         wav = torch.from_numpy(np.ascontiguousarray(audio)).float()
 
-        timestamps = self._get_speech_timestamps(
-            wav,
-            self._vad_model,
-            sampling_rate=_TARGET_SR,
-            threshold=self.settings.vad_threshold,
-        )
+        # Serialise model inference: Silero VAD's internal LSTM state is
+        # mutated during a forward pass, so concurrent calls from threads
+        # corrupt it and segfault on the C++ side.
+        with self._vad_lock:
+            timestamps = self._get_speech_timestamps(
+                wav,
+                self._vad_model,
+                sampling_rate=_TARGET_SR,
+                threshold=self.settings.vad_threshold,
+            )
         if not timestamps:
             return []
 

@@ -14,6 +14,7 @@ call-level `confidence_score`.
 import json
 import math
 import os
+import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -39,6 +40,13 @@ class TranscriptionService(BaseService):
         self._dtype: Optional[torch.dtype] = None
         self._forced_decoder_ids = None
         self._adapter_version: str = ""
+        # Serialise generate() across threads: Whisper's KV cache and other
+        # generation state are tied to the model instance, and concurrent
+        # forward passes from a thread pool produce undefined behaviour on
+        # CPU (and crashes under heavy contention). Audio I/O, feature
+        # extraction, decoding, and the API stages keep overlapping; only
+        # the actual model.generate call is held single-threaded.
+        self._gen_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Initialization
@@ -274,7 +282,7 @@ class TranscriptionService(BaseService):
         if self._forced_decoder_ids is not None:
             gen_kwargs["forced_decoder_ids"] = self._forced_decoder_ids
 
-        with torch.no_grad():
+        with self._gen_lock, torch.no_grad():
             output = self._model.generate(features, **gen_kwargs)
 
         sequences = output.sequences  # [B, full_len]

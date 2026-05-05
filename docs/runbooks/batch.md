@@ -113,14 +113,29 @@ check (since they never reached `COMPLETE`).
 ## Concurrency notes
 
 The runner uses a thread pool with **one shared `CallAnalysisPipeline`
-instance** (model loaded once). Threads are appropriate because:
+instance** (model loaded once). One shared model saves RAM compared to
+a multi-process pool that would duplicate the ~3 GB Whisper checkpoint
+per worker.
 
-- Heavy work (Whisper inference, network I/O for Gemini and vLLM)
-  releases the GIL.
-- One shared model saves RAM compared to a multi-process pool that
-  would duplicate the ~3 GB Whisper checkpoint per worker.
+What overlaps across threads:
 
-Tune `--workers` based on the host:
+- Audio I/O (soundfile / librosa)
+- Feature extraction
+- Token decoding
+- Network I/O to Gemini and vLLM
+- Postgres writes
+
+What is **serialised** by per-service locks (concurrent inference on a
+shared torch model is not safe — Silero's LSTM hidden state and
+Whisper's KV cache are mutated during a forward pass and crash under
+concurrent calls):
+
+- Silero VAD `_get_speech_timestamps` call
+- Whisper `model.generate` call
+
+Net throughput from `--workers > 1` is "API stages of call A run while
+inference for call B runs", not full parallel inference. On a CPU-only
+box where transcription dominates, the gain is modest. Tune accordingly:
 
 | Host | Suggested `--workers` |
 |---|---|
