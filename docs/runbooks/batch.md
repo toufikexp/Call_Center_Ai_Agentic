@@ -19,15 +19,63 @@ many files and adds idempotent resume.
 ## Quick start
 
 ```bash
-# Directory of WAVs
-python -m src.batch run --input-dir data/audio_files --pattern '*.wav'
+# Use $INPUT_DIR from .env (default: data/audio_files)
+python -m src.batch run
+
+# Override the input directory on the CLI
+python -m src.batch run --input-dir /mnt/calls/inbox --pattern '*.wav'
 
 # Explicit list of files
 python -m src.batch run --manifest /path/to/list.txt
 ```
 
 `list.txt`: one absolute audio path per line. Blank lines and lines
-starting with `#` are ignored.
+starting with `#` are ignored. When `--manifest` is given, `--input-dir`
+and `$INPUT_DIR` are ignored.
+
+## Input directory resolution
+
+Precedence (first non-empty wins):
+
+1. `--input-dir <path>` on the CLI
+2. `$INPUT_DIR` from `.env`
+3. Default: `data/audio_files`
+
+`--manifest` short-circuits all three.
+
+## Archive layout (default behaviour)
+
+After each call the runner moves the audio file out of the input
+directory based on the result status:
+
+```
+ARCHIVE_DIR/
+└── processed_<YYYYMMDD>/
+    ├── completed/         ← COMPLETE
+    └── manual_review/     ← MANUAL_REVIEW
+```
+
+`ARCHIVE_DIR` resolves the same way as input: CLI `--archive-dir` →
+`$ARCHIVE_DIR` → `--input-dir` (so the example layout
+`data/audio_files/processed_…/…` works out of the box). Multiple batches
+on the same day share the same `processed_<YYYYMMDD>/` folder.
+
+What does **not** get moved:
+
+- `ERROR`, `EXCEPTION`, `ID_ERROR` — left in the input directory so the
+  next batch retries them automatically. The deterministic `call_id` +
+  `is_already_processed` check ensures they don't re-process if they
+  later succeed.
+- `SKIPPED` (idempotency match) — file isn't in the input directory
+  in the first place; it was moved by the batch that completed it.
+
+To turn the archive off:
+
+```bash
+python -m src.batch run --no-archive
+```
+
+Files then stay in the input directory regardless of status.
 
 ## Useful flags
 
@@ -38,6 +86,9 @@ starting with `#` are ignored.
 | `--no-skip-completed` | Re-process files even if a previous attempt landed in COMPLETE. Default skips them. |
 | `--batch-name "nightly-2026-05-04"` | Free-text label persisted to `batch_runs.notes`. |
 | `--dry-run` | Resolve and print the input list, do nothing. |
+| `--input-dir PATH` | Override `$INPUT_DIR`. |
+| `--archive-dir PATH` | Override `$ARCHIVE_DIR`. Defaults to the resolved input dir. |
+| `--no-archive` | Don't move processed files; leave them in place. |
 
 ## How idempotent resume works
 
@@ -165,3 +216,5 @@ These are separable improvements, not part of the batch entry point.
 | `is_already_processed lookup failed` warning followed by reprocess | Database is unreachable; the runner intentionally proceeds rather than block on a flaky DB. Fix the DB and resume. |
 | Batch summary shows `EXCEPTION` count > 0 | An uncaught error in `pipeline.run`. Check the per-batch log for the traceback. |
 | `enable_file_logging` is True but no batch log file | Check `PipelineSettings.logs_dir` exists and is writable. |
+| `Archive move failed for X.wav: …` | Cross-filesystem move (input on one mount, archive on another) — `os.replace` requires same FS. Either keep them on the same mount or use `--no-archive` and move externally. |
+| File reappears in input directory after a successful run | Status was `ERROR`/`EXCEPTION` (left in place by design for retry), not `COMPLETE`. Check the batch log. |

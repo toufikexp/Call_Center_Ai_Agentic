@@ -20,15 +20,22 @@ def _build_parser() -> argparse.ArgumentParser:
         "run",
         help="Process a directory or manifest of audio files.",
     )
-    src_group = run.add_mutually_exclusive_group(required=True)
+    # Either an input directory or a manifest file. Both are optional on the
+    # CLI — if neither is given, input dir falls back to $INPUT_DIR or
+    # `data/audio_files`. Manifest, when present, takes precedence.
+    src_group = run.add_mutually_exclusive_group(required=False)
     src_group.add_argument(
         "--input-dir",
-        help="Directory containing audio files. Use --pattern to filter.",
+        default=None,
+        help="Directory containing audio files. Default: $INPUT_DIR or data/audio_files. "
+             "Use --pattern to filter.",
     )
     src_group.add_argument(
         "--manifest",
+        default=None,
         help="Text file with one absolute audio path per line "
-             "(blank lines and lines starting with '#' are skipped).",
+             "(blank lines and lines starting with '#' are skipped). "
+             "When given, --input-dir is ignored.",
     )
     run.add_argument(
         "--pattern",
@@ -64,6 +71,20 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Resolve and print the input list, then exit. No processing.",
     )
+    # Archive options — move processed files out of the input directory
+    # into per-batch subfolders so the input dir stays "to-do only".
+    run.add_argument(
+        "--archive-dir",
+        default=None,
+        help="Parent for processed_<YYYYMMDD>/{completed,manual_review} subfolders. "
+             "Default: $ARCHIVE_DIR or the resolved --input-dir. ERROR / unhandled "
+             "files stay in the input directory and are retried on the next run.",
+    )
+    run.add_argument(
+        "--no-archive",
+        action="store_true",
+        help="Disable file moves. Processed files remain in the input directory.",
+    )
     return parser
 
 
@@ -80,6 +101,8 @@ def main(argv=None) -> int:
             skip_completed=not args.no_skip_completed,
             batch_name=args.batch_name,
             dry_run=args.dry_run,
+            archive_dir=args.archive_dir,
+            archive_enabled=not args.no_archive,
         )
         return runner.run()
 

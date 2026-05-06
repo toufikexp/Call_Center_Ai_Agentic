@@ -17,11 +17,13 @@ What this is NOT:
 """
 import logging
 import os
+import shutil
 import signal
 import sys
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -42,6 +44,8 @@ _LOGGERS_TO_CAPTURE = (
     "config",
 )
 
+_DEFAULT_INPUT_DIR = "data/audio_files"
+
 
 class BatchRunner:
     """Process many audio files using a single shared pipeline instance."""
@@ -56,12 +60,33 @@ class BatchRunner:
         skip_completed: bool = True,
         batch_name: Optional[str] = None,
         dry_run: bool = False,
+        archive_dir: Optional[str] = None,
+        archive_enabled: bool = True,
     ):
-        if not input_dir and not manifest:
-            raise ValueError("Either input_dir or manifest is required")
+        # Resolve input source: --manifest wins over --input-dir; otherwise
+        # CLI arg → $INPUT_DIR → default.
+        if manifest:
+            self.manifest = manifest
+            self.input_dir = None
+        else:
+            self.manifest = None
+            self.input_dir = (
+                input_dir
+                or os.getenv("INPUT_DIR")
+                or _DEFAULT_INPUT_DIR
+            )
 
-        self.input_dir = input_dir
-        self.manifest = manifest
+        # Archive parent (where processed_<YYYYMMDD>/ is created):
+        # CLI arg → $ARCHIVE_DIR → fall back to the resolved input dir
+        # (matches the "data/audio_files/processed_…" example layout).
+        self.archive_dir = (
+            archive_dir
+            or os.getenv("ARCHIVE_DIR")
+            or self.input_dir
+            or _DEFAULT_INPUT_DIR
+        )
+        self.archive_enabled = archive_enabled
+
         self.pattern = pattern
         self.workers = max(1, workers)
         self.limit = limit
@@ -71,6 +96,14 @@ class BatchRunner:
 
         self._stop_event = threading.Event()
         self._logger = self._make_logger()
+
+        # Computed once when run() starts so all moves go to the same
+        # date-stamped folder for this batch.
+        self._completed_dir: Optional[Path] = None
+        self._review_dir: Optional[Path] = None
+        # Serialise file moves so concurrent workers don't race on
+        # mkdir / replace for the same target dir.
+        self._move_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Logging
@@ -132,6 +165,61 @@ class BatchRunner:
         if self.limit is not None:
             paths = paths[: self.limit]
         return paths
+
+    # ------------------------------------------------------------------
+    # Archive (move processed files out of the input dir)
+    # ------------------------------------------------------------------
+    def _build_archive_paths(self) -> Tuple[Path, Path]:
+        """Compute completed/ and manual_review/ paths for this batch.
+
+        Folder name is `processed_<YYYYMMDD>` so multiple batches in one
+        day share one archive. Sub-folders are created lazily on first
+        move.
+        """
+        date_str = datetime.now().strftime("%Y%m%d")
+        base = Path(self.archive_dir) / f"processed_{date_str}"
+        return (base / "completed", base / "manual_review")
+
+    def _archive_one(self, audio_path: str, status: str) -> None:
+        """Move a single processed file to the right archive folder.
+
+        Policy:
+          COMPLETE        → completed/
+          MANUAL_REVIEW   → manual_review/
+          (anything else) → leave in place (ERROR / EXCEPTION / ID_ERROR /
+                            SKIPPED retry on the next batch run)
+        """
+        if not self.archive_enabled:
+            return
+        if status == "COMPLETE":
+            target_dir = self._completed_dir
+        elif status == "MANUAL_REVIEW":
+            target_dir = self._review_dir
+        else:
+            return
+
+        if target_dir is None:
+            return  # archive disabled for this run
+
+        src = Path(audio_path)
+        if not src.exists():
+            # Already moved (e.g. by a previous run) or never existed.
+            return
+
+        try:
+            with self._move_lock:
+                target_dir.mkdir(parents=True, exist_ok=True)
+                target = target_dir / src.name
+                # os.replace is atomic on the same filesystem and
+                # silently overwrites if the target exists.
+                os.replace(str(src), str(target))
+            self._logger.info(
+                f"📦 archived {src.name} → {target_dir.parent.name}/{target_dir.name}/"
+            )
+        except OSError as e:
+            self._logger.warning(
+                f"Archive move failed for {src.name}: {e}; file left in place"
+            )
 
     # ------------------------------------------------------------------
     # Signal handling
@@ -226,6 +314,17 @@ class BatchRunner:
                 f"📦 Batch {batch_id} (storage disabled — DB tracking off)"
             )
 
+        # Compute archive paths once so all moves in this batch land in the
+        # same date-stamped folder, even if the run spans midnight.
+        if self.archive_enabled:
+            self._completed_dir, self._review_dir = self._build_archive_paths()
+            self._logger.info(
+                f"📁 Archive: COMPLETE → {self._completed_dir}, "
+                f"MANUAL_REVIEW → {self._review_dir}"
+            )
+        else:
+            self._logger.info("📁 Archive: disabled (--no-archive)")
+
         log_handler = self._setup_batch_log_file(batch_id, settings)
 
         counts: Dict[str, int] = {}
@@ -242,8 +341,11 @@ class BatchRunner:
                     futures[ex.submit(self._process_one, pipeline, p)] = p
 
                 for fut in as_completed(futures):
+                    audio_path = futures[fut]
                     call_id, status = fut.result()
                     counts[status] = counts.get(status, 0) + 1
+                    # Move the file out of the input dir if applicable.
+                    self._archive_one(audio_path, status)
                     if self._stop_event.is_set():
                         # Cancel anything that hasn't started yet; running
                         # calls finish naturally.
