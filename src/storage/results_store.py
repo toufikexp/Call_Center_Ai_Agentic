@@ -93,6 +93,35 @@ CREATE TABLE IF NOT EXISTS batch_runs (
 """
 
 
+# Idempotent in-place migrations.
+#
+# CREATE TABLE IF NOT EXISTS does nothing when the table already exists, so
+# columns that were added to the schema *after* a database was first
+# deployed never appear there. The block below uses
+# ADD COLUMN IF NOT EXISTS (PostgreSQL ≥ 9.6) to backfill any column that's
+# missing on an older instance. New databases run these statements as
+# no-ops; older databases get the missing columns added without a separate
+# migration tool.
+#
+# Convention: whenever you add a column to one of the CREATE TABLE blocks
+# above, also append the matching ALTER here. Keep types identical to the
+# CREATE statement. Only NULLABLE columns (or columns with a DEFAULT) are
+# safe to add on a populated table — never add NOT NULL without DEFAULT
+# this way; that requires a real migration.
+MIGRATIONS = """
+ALTER TABLE calls         ADD COLUMN IF NOT EXISTS duration_s    REAL;
+ALTER TABLE calls         ADD COLUMN IF NOT EXISTS channel_count SMALLINT;
+
+ALTER TABLE call_results  ADD COLUMN IF NOT EXISTS classification_confidence REAL;
+ALTER TABLE call_results  ADD COLUMN IF NOT EXISTS sentiment_label           TEXT;
+ALTER TABLE call_results  ADD COLUMN IF NOT EXISTS sentiment_reasoning       TEXT;
+ALTER TABLE call_results  ADD COLUMN IF NOT EXISTS whisper_adapter_version   TEXT;
+ALTER TABLE call_results  ADD COLUMN IF NOT EXISTS segments                  JSONB;
+
+ALTER TABLE batch_runs    ADD COLUMN IF NOT EXISTS notes TEXT;
+"""
+
+
 def _make_logger() -> logging.Logger:
     logger = logging.getLogger("storage.results")
     if not logger.handlers:
@@ -157,7 +186,12 @@ class ResultsStore:
         try:
             with self._connect() as conn:
                 with conn.cursor() as cur:
+                    # Create tables and indexes if missing (no-op on
+                    # already-deployed databases).
                     cur.execute(SCHEMA)
+                    # Backfill any columns added after the database was
+                    # first created. Idempotent on up-to-date schemas.
+                    cur.execute(MIGRATIONS)
             self._logger.info("✅ ResultsStore ready (PostgreSQL)")
         except Exception as e:
             # Re-raise — without a working schema the store is unusable.

@@ -229,9 +229,19 @@ ORDER BY (s->>'start_ms')::int;
   runner is using idempotency to skip already-COMPLETE files; skips do
   not pass through `record_attempt` and therefore do not increment a
   counter.
-- **Schema migrations** are not handled by code. To add a column later,
-  write the `ALTER TABLE` by hand (or adopt Alembic when the schema gets
-  more complex).
+- **Schema migrations are idempotent and automatic for column additions.**
+  `ResultsStore._initialize_schema()` runs both a `SCHEMA` block
+  (`CREATE TABLE IF NOT EXISTS …`) and a `MIGRATIONS` block
+  (`ALTER TABLE … ADD COLUMN IF NOT EXISTS …`) on every process start.
+  When a new column is added to the `CREATE TABLE` in
+  `src/storage/results_store.py`, append a matching line to the
+  `MIGRATIONS` constant in the same file. New databases run the ALTERs
+  as no-ops; older ones get the missing columns added without a
+  separate migration tool. Only nullable columns or columns with a
+  `DEFAULT` are safe to add this way; `NOT NULL` without a default on a
+  populated table requires a real backfill (write a one-off SQL
+  migration in that case). For schema changes beyond column additions
+  (renames, type changes, drops), promote to Alembic.
 - **Vacuum / analyze** PostgreSQL handles automatically. Nothing to do at
   10 K rows/day. Consider a dedicated `VACUUM ANALYZE` schedule above
   ~10 M rows.
