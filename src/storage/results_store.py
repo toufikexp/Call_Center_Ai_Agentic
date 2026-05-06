@@ -184,28 +184,20 @@ class ResultsStore:
         return batch_id
 
     def finish_batch(self, batch_id: str) -> None:
-        """Stamp finished_at and aggregate counts from call_results."""
+        """Stamp finished_at on `batch_runs`.
+
+        Counters (success_count / error_count / review_count) are kept
+        live by `record_attempt` inside the same transaction that
+        inserts each `call_results` row, so this method only marks the
+        batch as done and does not need to re-aggregate.
+        """
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(
-                    """SELECT
-                         COALESCE(SUM(CASE WHEN status='COMPLETE'      THEN 1 ELSE 0 END), 0),
-                         COALESCE(SUM(CASE WHEN status='ERROR'         THEN 1 ELSE 0 END), 0),
-                         COALESCE(SUM(CASE WHEN status='MANUAL_REVIEW' THEN 1 ELSE 0 END), 0)
-                       FROM call_results WHERE batch_id = %s""",
-                    (batch_id,),
-                )
-                row = cur.fetchone()
-                success, error, review = row if row else (0, 0, 0)
-
-                cur.execute(
                     """UPDATE batch_runs
-                           SET finished_at = now(),
-                               success_count = %s,
-                               error_count = %s,
-                               review_count = %s
+                           SET finished_at = now()
                          WHERE batch_id = %s""",
-                    (success, error, review, batch_id),
+                    (batch_id,),
                 )
 
     # ------------------------------------------------------------------
@@ -233,16 +225,38 @@ class ResultsStore:
 
         segments_json = self._Jsonb([s.model_dump() for s in result.segments])
 
+        # Source-the-truth values for calls.duration_s / channel_count.
+        # When the audio failed to load (e.g. corrupt file), result fields
+        # are 0; treat those as NULL so analytics queries don't average
+        # over fake zeros.
+        audio_duration_s = result.audio_duration_s if result.audio_duration_s > 0 else None
+        channel_count = result.channel_count if result.channel_count > 0 else None
+
+        # Map status to the matching batch_runs counter column. A status
+        # that doesn't correspond to a counter (e.g. PENDING, IN_PROGRESS)
+        # leaves all three columns alone.
+        counter_column = {
+            "COMPLETE": "success_count",
+            "ERROR": "error_count",
+            "MANUAL_REVIEW": "review_count",
+        }.get(result.status.value)
+
         try:
             with self._connect() as conn:
                 with conn.cursor() as cur:
+                    # Upsert calls — pull duration / channel_count forward
+                    # so old rows get backfilled when re-processed.
                     cur.execute(
-                        """INSERT INTO calls (call_id, audio_path)
-                               VALUES (%s, %s)
+                        """INSERT INTO calls (call_id, audio_path, duration_s, channel_count)
+                               VALUES (%s, %s, %s, %s)
                            ON CONFLICT (call_id) DO UPDATE
-                               SET audio_path = EXCLUDED.audio_path""",
-                        (call_id, audio_path),
+                               SET audio_path    = EXCLUDED.audio_path,
+                                   duration_s    = COALESCE(EXCLUDED.duration_s, calls.duration_s),
+                                   channel_count = COALESCE(EXCLUDED.channel_count, calls.channel_count)""",
+                        (call_id, audio_path, audio_duration_s, channel_count),
                     )
+
+                    # Insert the per-attempt row.
                     cur.execute(
                         """INSERT INTO call_results (
                                 call_id, batch_id, status,
@@ -283,6 +297,19 @@ class ResultsStore:
                             duration,
                         ),
                     )
+
+                    # Live batch metrics: bump the matching counter in the
+                    # same transaction so the batch_runs row reflects
+                    # progress as workers finish, not only at end-of-batch.
+                    # PostgreSQL row-level locking serialises concurrent
+                    # workers updating the same batch_id correctly.
+                    if batch_id and counter_column:
+                        cur.execute(
+                            f"""UPDATE batch_runs
+                                    SET {counter_column} = {counter_column} + 1
+                                  WHERE batch_id = %s""",
+                            (batch_id,),
+                        )
         except Exception as e:
             self._logger.error(f"Failed to record attempt for {call_id}: {e}")
 

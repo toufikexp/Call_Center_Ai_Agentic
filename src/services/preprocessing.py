@@ -82,10 +82,12 @@ class PreprocessingService(BaseService):
     # ------------------------------------------------------------------
     def process(self, audio_path: str) -> ServiceResult:
         """
-        Returns a ServiceResult whose `data["segments"]` is a list of dicts:
-            {"channel": "agent"|"client"|"unknown",
-             "start_ms": int, "end_ms": int,
-             "audio": np.ndarray (float32, 16 kHz, mono)}
+        Returns a ServiceResult whose `data` contains:
+            {
+                "segments":         list of {"channel", "start_ms", "end_ms", "audio"},
+                "audio_duration_s": float,   # original audio duration in seconds
+                "channel_count":    int,     # 1 (mono) or 2 (stereo); >2 reduced to 2
+            }
         """
 
         def _run():
@@ -99,6 +101,14 @@ class PreprocessingService(BaseService):
                 f"📁 {os.path.basename(audio_path)}: {len(channels)} channel(s), "
                 f"{[lbl for lbl, _ in channels]}"
             )
+
+            # Audio duration: every channel array is the same length after
+            # resampling, so the duration is len(channel) / target_sr.
+            if channels:
+                audio_duration_s = float(len(channels[0][1])) / float(_TARGET_SR)
+            else:
+                audio_duration_s = 0.0
+            channel_count = len(channels)
 
             all_segments: List[dict] = []
             for channel_label, audio in channels:
@@ -122,13 +132,18 @@ class PreprocessingService(BaseService):
             self.logger.info("=" * 60)
             self.logger.info("🎙️ PREPROCESSING RESULT")
             self.logger.info("=" * 60)
+            self.logger.info(f"Audio duration: {audio_duration_s:.1f}s ({channel_count} channel)")
             self.logger.info(f"Total segments: {len(all_segments)}")
             if all_segments:
                 total_speech_ms = sum(s["end_ms"] - s["start_ms"] for s in all_segments)
                 self.logger.info(f"Total speech duration: {total_speech_ms / 1000:.1f}s")
             self.logger.info("=" * 60)
 
-            return {"segments": all_segments}
+            return {
+                "segments": all_segments,
+                "audio_duration_s": audio_duration_s,
+                "channel_count": channel_count,
+            }
 
         return self._execute_with_timing(_run)
 

@@ -167,7 +167,13 @@ class CallAnalysisPipeline:
             self.logger.error(f"Preprocessing failed: {result.error_message}")
             return {"result": result, "segments": []}
 
-        segments = service_result.data.get("segments", [])
+        data = service_result.data
+        # Audio metadata: persisted in calls.duration_s / calls.channel_count
+        # via the storage layer, and surfaced in the JSON output for analytics.
+        result.audio_duration_s = float(data.get("audio_duration_s", 0.0))
+        result.channel_count = int(data.get("channel_count", 0))
+
+        segments = data.get("segments", [])
         if not segments:
             # No speech detected — treat as low-quality input headed to manual review.
             self.logger.warning("No speech segments detected; routing to manual review")

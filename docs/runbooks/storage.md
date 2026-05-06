@@ -208,6 +208,27 @@ ORDER BY (s->>'start_ms')::int;
 - **Failures are non-fatal.** If PostgreSQL is unreachable mid-run, the
   store logs the error and the pipeline finishes anyway. JSON file output
   always succeeds.
+- **`calls.duration_s` is populated by preprocessing.** The pipeline
+  computes audio duration and channel count from the loaded waveform
+  (no extra disk read) and forwards them to the storage layer. Old rows
+  with `NULL` durations are backfilled the next time the audio is
+  reprocessed (the `ON CONFLICT` clause uses `COALESCE`).
+- **Live batch metrics.** `batch_runs.success_count` /
+  `error_count` / `review_count` are incremented inside the same
+  transaction as each `call_results` insert, so the row reflects
+  progress as workers finish — not only after `finish_batch`. You can
+  watch a long-running batch with:
+  ```sql
+  SELECT batch_id, started_at, file_count,
+         success_count + error_count + review_count AS processed,
+         success_count, error_count, review_count
+  FROM batch_runs
+  WHERE finished_at IS NULL;
+  ```
+  Note that `processed` may be less than `file_count` when the batch
+  runner is using idempotency to skip already-COMPLETE files; skips do
+  not pass through `record_attempt` and therefore do not increment a
+  counter.
 - **Schema migrations** are not handled by code. To add a column later,
   write the `ALTER TABLE` by hand (or adopt Alembic when the schema gets
   more complex).
@@ -217,8 +238,9 @@ ORDER BY (s->>'start_ms')::int;
 - **Backups.** The DB is queryable state, not the source of truth — JSON
   files are. `pg_dump call_center > snapshot.sql` weekly is enough.
 - **Multi-worker safety.** `record_attempt` opens its own connection per
-  call and runs the upsert + insert in one transaction. Many workers can
-  point at the same database without a lock.
+  call and runs the upsert + result insert + batch counter UPDATE in one
+  transaction. PostgreSQL row-level locking serialises concurrent
+  workers updating the same `batch_runs` row correctly.
 
 ## Switching back to JSON-only
 

@@ -55,9 +55,11 @@ get a single `unknown` channel.
 
 **Output `data` dict:**
 
-| Key        | Type        | Notes                                                                                                |
-|------------|-------------|------------------------------------------------------------------------------------------------------|
-| `segments` | `list[dict]` | Each entry: `{"channel": "agent"\|"client"\|"unknown", "start_ms": int, "end_ms": int, "audio": np.ndarray}` |
+| Key                | Type         | Notes                                                                                                                   |
+|--------------------|--------------|-------------------------------------------------------------------------------------------------------------------------|
+| `segments`         | `list[dict]` | Each entry: `{"channel": "agent"\|"client"\|"unknown", "start_ms": int, "end_ms": int, "audio": np.ndarray}`           |
+| `audio_duration_s` | `float`      | Original audio duration in seconds; persisted to `calls.duration_s` and surfaced on `CallAnalysisResult`               |
+| `channel_count`    | `int`        | 1 for mono, 2 for stereo (post channel-mapping); persisted to `calls.channel_count`                                    |
 
 Segments are sorted chronologically across channels. `audio` is float32 mono
 at 16 kHz. Segments shorter than `min_segment_seconds` or longer than
@@ -183,6 +185,8 @@ Schema = `CallAnalysisResult.model_dump()` plus a few injected fields.
 | `sentiment_label`           | `str`            | `POSITIVE` / `NEUTRAL` / `NEGATIVE` / `""`                            |
 | `sentiment_reasoning`       | `str`            | One-sentence justification, or `""`                                   |
 | `segments`                  | `list[object]`   | Per-segment `{channel, start_ms, end_ms, text, confidence}`           |
+| `audio_duration_s`          | `float`          | Original audio duration in seconds, computed by preprocessing          |
+| `channel_count`             | `int`            | 1 (mono fallback) or 2 (stereo agent/client)                          |
 | `whisper_adapter_version`   | `str`            | LoRA adapter folder name, or `""` for merged checkpoints              |
 | `status`                    | `str`            | One of: `PENDING`, `IN_PROGRESS`, `COMPLETE`, `MANUAL_REVIEW`, `ERROR` |
 | `error_message`             | `str \| null`    | Set when `status == ERROR`                                            |

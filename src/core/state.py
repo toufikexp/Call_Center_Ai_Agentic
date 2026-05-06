@@ -43,6 +43,8 @@ class CallAnalysisResult(BaseModel):
     sentiment_label: str = Field(default="", description="Sentiment label (POSITIVE, NEUTRAL, NEGATIVE)")
     sentiment_reasoning: str = Field(default="", description="One-sentence justification for the satisfaction score")
     segments: List[SegmentResult] = Field(default_factory=list, description="Per-segment transcription details")
+    audio_duration_s: float = Field(default=0.0, ge=0.0, description="Original audio duration in seconds (computed during preprocessing)")
+    channel_count: int = Field(default=0, ge=0, description="Number of audio channels in the input file")
     whisper_adapter_version: str = Field(default="", description="Identifier of the LoRA adapter used (folder name), or '' if a full merged checkpoint was used")
     status: ProcessingStatus = Field(default=ProcessingStatus.PENDING, description="Processing status")
     error_message: Optional[str] = Field(default=None, description="Error message if any")
