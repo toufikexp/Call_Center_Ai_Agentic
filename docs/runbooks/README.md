@@ -11,4 +11,5 @@ Operational procedures for the most common tasks and failure modes.
 | [Threshold tuning](threshold-tuning.md)                | Too many `MANUAL_REVIEW`s, or quality concerns             |
 | [PostgreSQL storage](storage.md)                       | Enable persistence, schema, useful queries                 |
 | [Batch processing](batch.md)                           | `python -m src.batch run …`, idempotent resume             |
+| [Deployment (Docker/RHEL)](deployment.md)              | Build → registry → prod VM, model staging, nightly timer   |
 | [Incident response](incident-response.md)              | Symptom-driven triage when something is broken             |

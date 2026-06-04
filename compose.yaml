@@ -1,0 +1,58 @@
+# Docker Compose for the Call Center pipeline + PostgreSQL.
+#
+# Usage on the prod RHEL 9 VM (after `docker pull <registry>/cc-pipeline:<tag>`):
+#   CC_IMAGE=<registry>/cc-pipeline:<tag> docker compose --env-file deploy/.env.prod up
+#
+# Or for a one-off batch run that exits when done:
+#   CC_IMAGE=... docker compose --env-file deploy/.env.prod run --rm app --workers 3
+#
+# Notes:
+# - Models are bind-mounted from the host; they are NOT in the image.
+# - The `:Z` suffix on bind mounts relabels them for SELinux (required on RHEL).
+#   Drop the `:Z` if running on a non-SELinux host.
+# - PostgreSQL data persists in the named volume `pgdata`.
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-cc_pipeline}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the env file}
+      POSTGRES_DB: ${POSTGRES_DB:-call_center}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    # Exposed on localhost only; the app talks to it over the compose network.
+    # Uncomment to reach it from the host (e.g. DBeaver via an SSH tunnel):
+    # ports:
+    #   - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cc_pipeline} -d ${POSTGRES_DB:-call_center}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    image: ${CC_IMAGE:?set CC_IMAGE to the registry image tag}
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - deploy/.env.prod
+    # DATABASE_URL points at the `db` service over the compose network,
+    # overriding whatever host/port is in the env file.
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-cc_pipeline}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-call_center}
+      STORAGE_ENABLE: "1"
+    volumes:
+      # Audio in/out + logs + archive. Host path on the left; container path
+      # matches the INPUT_DIR / ARCHIVE_DIR / output_dir in the env file.
+      - ${CC_DATA_DIR:-./data}:/app/data:Z
+      # Pre-staged Whisper base + LoRA adapter (HF cache layout).
+      - ${CC_MODELS_DIR:-/opt/cc/models}:/opt/cc/models:Z
+    # Override the default CMD as needed:
+    #   docker compose run --rm app --workers 3 --batch-name nightly
+    command: ["--workers", "3"]
+
+volumes:
+  pgdata:
