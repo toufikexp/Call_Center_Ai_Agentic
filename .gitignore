@@ -2,9 +2,11 @@ cc_agentic_env/
 __pycache__/
 *.pyc
 .env
+.env.*
 deploy/.env.prod
 deploy/.env.*
 !deploy/env.prod.example
+!deploy/env.dev.example
 cc-models*.tar.gz
 .cursor/
 .vscode/

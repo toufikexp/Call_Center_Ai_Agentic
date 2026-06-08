@@ -1,4 +1,54 @@
-# Runbook — Production deployment (Docker, RHEL 9, CPU-only)
+# Runbook — Deployment (Docker)
+
+Two flows:
+
+- **Dev test on WSL** — verify the image locally against your existing models
+  and HF cache before shipping. See "Dev test (WSL)" below.
+- **Production on RHEL 9** — build → registry → prod VM with pre-staged
+  offline models. The rest of this document.
+
+---
+
+## Dev test (WSL)
+
+Test the exact image that will ship to prod, but against your existing local
+files — no model staging, internet allowed, CPU inference (the image is CPU
+torch; that's fine for verification).
+
+```bash
+# 1. Build the image (once; rebuilds are fast after code-only changes)
+docker build -t cc-pipeline:local .
+
+# 2. Dev env file
+cp deploy/env.dev.example .env.dev
+#    edit .env.dev → set GEMINI_API_KEY (and WHISPER_ADAPTER_PATH if your
+#    adapter folder name differs from the default)
+
+# 3. Start Postgres
+docker compose -f compose.dev.yaml up -d db
+
+# 4. Run a 3-file smoke batch
+docker compose -f compose.dev.yaml run --rm app --limit 3 --batch-name dev-test
+
+# 5. Inspect
+docker compose -f compose.dev.yaml exec db \
+    psql -U cc_pipeline -d call_center -c \
+    "SELECT call_id, status, subject, audio_duration_s FROM call_results ORDER BY finished_at DESC LIMIT 5;"
+ls data/audio_files/processed_$(date +%Y%m%d)/completed/ 2>/dev/null
+
+# 6. Stop (keeps DB data; add -v to wipe)
+docker compose -f compose.dev.yaml down
+```
+
+`compose.dev.yaml` mounts `./models`, `~/.cache/huggingface`, and `./data`
+straight into the container, so it uses your already-downloaded Whisper and
+your existing adapter. Iterate by editing `src/`, re-running
+`docker build -t cc-pipeline:local .` (≈10–30 s, deps layer cached), and
+re-running step 4.
+
+---
+
+## Production deployment (RHEL 9, CPU-only)
 
 How to ship the pipeline to the production VM. The image is built on a
 machine with internet (your dev box), pushed to the internal registry, and
