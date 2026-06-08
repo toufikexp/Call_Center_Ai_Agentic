@@ -1,0 +1,8 @@
+# CUDA torch stack (cu130). Used by the cc-pipeline:gpu image and by the
+# existing GPU dev venv (via the root requirements.txt thin wrapper).
+--extra-index-url https://download.pytorch.org/whl/cu130
+
+torch==2.9.1+cu130
+torchaudio==2.9.1
+torchvision==0.24.1+cu130
+triton==3.5.1

@@ -1,5 +1,5 @@
-# Keep the build context (and image) small. The image contains only code +
-# deps; data and models are bind-mounted at runtime.
+# Keep the build context (and final image) lean. The image contains only
+# code + deps; data, models, and the dev venv are bind-mounted at runtime.
 
 # Virtualenvs
 cc_agentic_env/
@@ -10,28 +10,28 @@ venv/
 __pycache__/
 *.pyc
 *.pyo
-*.pyd
 
-# Data — never in the image (bind-mounted)
-data/audio_files/*
-data/results/*
-data/logs/*
-data/segments/
-data/chunks/
+# Data — bind-mounted at runtime, never in the image
+data/
 
-# Models — never in the image (bind-mounted / pre-staged)
+# Models — bind-mounted at runtime, never in the image
 models/
 
-# VCS + IDE + local
+# Local state, IDE, VCS, secrets
 .git/
 .gitignore
 .cursor/
 .vscode/
 .env
-*.log
+.env.*
+!.env.example
 
-# Docs and deploy scripts not needed at runtime
+# Docs and ad-hoc shell helpers
 docs/
+README.md
 *.md
 push_manual.sh
 push_with_credentials.sh
+
+# Plan / scratch files (when present)
+*.log

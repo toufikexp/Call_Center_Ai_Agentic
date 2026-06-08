@@ -1,211 +1,193 @@
-# Runbook — Deployment (Docker)
+# Runbook — Deployment
 
-Two flows:
+One Dockerfile, one `compose.yaml`, one `.env`, one `Makefile`. The same
+artifact runs on dev (WSL) and prod (RHEL VM); the difference is the values
+in `.env`.
 
-- **Dev test on WSL** — verify the image locally against your existing models
-  and HF cache before shipping. See "Dev test (WSL)" below.
-- **Production on RHEL 9** — build → registry → prod VM with pre-staged
-  offline models. The rest of this document.
+## Mental model
 
----
+```
+                           build a CPU or GPU image
+        cc-pipeline:cpu  ←─────────── make build (TORCH=cpu|gpu)
+        cc-pipeline:gpu
 
-## Dev test (WSL)
+                              same image, different env
+                              ───────────────────────────►
+  [dev WSL]            [prod RHEL VM]
+  IMAGE=cc-pipeline:gpu (or cpu)         IMAGE=registry/.../cc-pipeline:cpu-<sha>
+  DATA_DIR=./data                        DATA_DIR=/var/lib/cc/data
+  ADAPTERS_DIR=./models                  ADAPTERS_DIR=/opt/cc/models/adapters
+  HF_CACHE_DIR=~/.cache/huggingface      HF_CACHE_DIR=/opt/cc/models/huggingface
+  HF_HUB_OFFLINE=0                       HF_HUB_OFFLINE=1
+  GEMINI_API_KEY=...                     GEMINI_API_KEY=... (or empty if blocked)
+```
 
-Test the exact image that will ship to prod, but against your existing local
-files — no model staging, internet allowed, CPU inference (the image is CPU
-torch; that's fine for verification).
+## Quick reference
+
+```
+make help              # list targets
+make build             # build cc-pipeline:cpu
+make build TORCH=gpu   # build cc-pipeline:gpu (cu130)
+make up                # start postgres
+make smoke             # 3-file batch
+make run ARGS="--workers 4 --batch-name nightly"
+make psql              # open psql in db container
+make shell             # bash shell in the app image
+make logs              # tail compose logs
+make down              # stop (keeps DB volume)
+make clean             # stop + wipe DB volume
+make push REGISTRY=registry.internal/team TAG=cpu-$(git rev-parse --short HEAD)
+```
+
+## Dev (WSL) workflow
 
 ```bash
-# 1. Build the image (once; rebuilds are fast after code-only changes)
-docker build -t cc-pipeline:local .
+cd ~/Call_Center_Ai_Agentic
+git pull origin main
 
-# 2. Dev env file
-cp deploy/env.dev.example .env.dev
-#    edit .env.dev → set GEMINI_API_KEY (and WHISPER_ADAPTER_PATH if your
-#    adapter folder name differs from the default)
+# 1. Build the image you'll use (CPU by default; GPU on a GPU box).
+make build               # → cc-pipeline:cpu
+# or:
+make build TORCH=gpu     # → cc-pipeline:gpu
 
-# 3. Start Postgres
-docker compose -f compose.dev.yaml up -d db
+# 2. Env file
+cp .env.example .env
+# Edit .env:
+#   - IMAGE                  match what you built
+#   - GEMINI_API_KEY         paste your key
+#   - POSTGRES_PASSWORD      anything for local
+#   - WHISPER_ADAPTER_PATH   /adapters/<your-folder-under-./models>
 
-# 4. Run a 3-file smoke batch
-docker compose -f compose.dev.yaml run --rm app --limit 3 --batch-name dev-test
+# 3. Start postgres
+make up
 
-# 5. Inspect
-docker compose -f compose.dev.yaml exec db \
-    psql -U cc_pipeline -d call_center -c \
-    "SELECT call_id, status, subject, audio_duration_s FROM call_results ORDER BY finished_at DESC LIMIT 5;"
-ls data/audio_files/processed_$(date +%Y%m%d)/completed/ 2>/dev/null
-
-# 6. Stop (keeps DB data; add -v to wipe)
-docker compose -f compose.dev.yaml down
+# 4. Smoke test
+make smoke
 ```
 
-`compose.dev.yaml` mounts `./models`, `~/.cache/huggingface`, and `./data`
-straight into the container, so it uses your already-downloaded Whisper and
-your existing adapter. Iterate by editing `src/`, re-running
-`docker build -t cc-pipeline:local .` (≈10–30 s, deps layer cached), and
-re-running step 4.
+That's it. No model staging — `./models` (your adapter) and
+`~/.cache/huggingface` (your downloaded Whisper) are bind-mounted directly.
 
----
-
-## Production deployment (RHEL 9, CPU-only)
-
-How to ship the pipeline to the production VM. The image is built on a
-machine with internet (your dev box), pushed to the internal registry, and
-pulled on the prod VM. Models are pre-staged separately and bind-mounted —
-they are never baked into the image.
-
-## Topology
-
-```
-[dev box: WSL Ubuntu, internet]
-   build CPU image  ─push─►  [internal registry]  ─pull─►  [prod VM: RHEL 9, CPU]
-   pack models      ─copy────────────────────────────────►  /opt/cc/models
-                                                              docker compose up
-                                                              ├── app  (this image)
-                                                              └── db   (postgres:16)
-```
-
-What lives where:
-
-| Thing | Location | In image? |
-|---|---|---|
-| Python deps + system libs (ffmpeg, libsndfile) | image | yes |
-| Application code (`src/`, `main.py`) | image | yes |
-| Silero VAD weights | image (baked at build) | yes |
-| Whisper base model (~3 GB) | `/opt/cc/models/huggingface` on VM | no — bind-mounted |
-| LoRA adapter (~35 MB) | `/opt/cc/models/adapters/<v>` on VM | no — bind-mounted |
-| Audio in/out, logs, archive | `<CC_DATA_DIR>` on VM → `/app/data` | no — bind-mounted |
-| PostgreSQL data | docker named volume `pgdata` | no — persistent volume |
-
-## One-time prerequisites on the prod VM
-
-- Docker is installed and active (`docker --version && systemctl is-active docker`).
-- The internal registry is reachable and you can `docker login` to it
-  (ask ops for hostname + credentials).
-- A data directory exists, e.g. `/var/lib/cc/data`, with the input subdir:
-  ```bash
-  sudo mkdir -p /var/lib/cc/data/audio_files
-  sudo chown -R 1000:1000 /var/lib/cc/data   # uid 1000 = appuser in the image
-  ```
-- A models directory exists: `sudo mkdir -p /opt/cc/models && sudo chown -R 1000:1000 /opt/cc/models`.
-
-## Step 1 — Build + push (dev box)
+To check results:
 
 ```bash
-docker login <registry>     # one-time
-
-REGISTRY=<registry>/<team> TAG=$(git rev-parse --short HEAD) \
-    ./scripts/build_and_push.sh
+make psql        # then run any SELECT against call_results / batch_runs
+ls data/audio_files/processed_$(date +%Y%m%d)/completed/
 ```
 
-This builds the CPU image (uses `deploy/requirements.cpu.txt`), bakes in the
-Silero VAD weights, tags it `:<sha>` and `:prod-latest`, and pushes both.
-**Pin the `:<sha>` tag** in the prod compose env — `prod-latest` is for
-convenience only and makes rollback ambiguous.
-
-## Step 2 — Pre-stage models (dev box → prod VM)
-
-On the dev box (internet available):
+To iterate on code:
 
 ```bash
-BASE_MODEL=openai/whisper-large-v3 \
-ADAPTER_SRC=/path/to/whisper-large-v3-lora-algerian_v7 \
-OUT=cc-models.tar.gz \
-    ./scripts/stage_models.sh pack
+# edit src/...
+make build       # ≤30 s, deps layer cached
+make smoke
 ```
 
-Transfer `cc-models.tar.gz` to the prod VM via your approved channel, then on
-the VM:
+## Production (RHEL 9, CPU-only)
+
+### One-time
 
 ```bash
-MODELS_DIR=/opt/cc/models TARBALL=cc-models.tar.gz \
-    ./scripts/stage_models.sh unpack
+# Docker is installed and running. Then:
+sudo mkdir -p /var/lib/cc/data/audio_files /opt/cc/models/adapters /opt/cc/models/huggingface
+sudo chown -R 1000:1000 /var/lib/cc/data /opt/cc/models        # uid 1000 = appuser
 ```
 
-Result on the VM:
+### Stage models on the VM
+
+The image expects two things under the bind-mount paths:
+
 ```
-/opt/cc/models/huggingface/   ← Whisper base (HF cache layout)
-/opt/cc/models/adapters/<v>/  ← LoRA adapter
+${HF_CACHE_DIR}/                                      # → /hf in container
+└── hub/models--openai--whisper-large-v3/...          # HF cache layout
+
+${ADAPTERS_DIR}/                                      # → /adapters in container
+└── whisper_trained_LoRa_adaptator/                   # your LoRA adapter dir
+    ├── adapter_config.json
+    └── adapter_model.safetensors
 ```
 
-New adapter version later: pack just the adapter (or copy the folder
-directly), drop it under `/opt/cc/models/adapters/`, update
-`WHISPER_ADAPTER_PATH` in `deploy/.env.prod`, and restart the app container.
-No image rebuild.
+Copy the Whisper base from your dev `~/.cache/huggingface` to the VM's
+`/opt/cc/models/huggingface`. Use whatever your security policy allows
+(rsync over SSH, internal share, tar over scp). Same for the adapter
+directory. There is no required scripting; the layout is the contract.
 
-## Step 3 — Configure (prod VM)
+### Build, push, pull
 
 ```bash
-cp deploy/env.prod.example deploy/.env.prod
-# edit deploy/.env.prod:
-#   POSTGRES_PASSWORD  → a real strong password
-#   WHISPER_ADAPTER_PATH → matches the staged adapter folder
-#   VLLM_BASE_URL      → where vLLM runs (localhost today; GPU env host later)
-#   GEMINI_API_KEY     → leave empty if the VM can't reach Gemini
+# On dev (internet available)
+make build                                                # cc-pipeline:cpu
+make push REGISTRY=registry.internal/team TAG=cpu-$(git rev-parse --short HEAD)
+
+# On the prod VM
+docker login registry.internal                            # one-time
+docker pull registry.internal/team/cc-pipeline:cpu-<sha>
 ```
 
-Export the deploy-time variables compose needs:
+### Configure on the VM
 
 ```bash
-export CC_IMAGE=<registry>/<team>/cc-pipeline:<sha>
-export CC_DATA_DIR=/var/lib/cc/data
-export CC_MODELS_DIR=/opt/cc/models
-# POSTGRES_* are read from deploy/.env.prod by the env_file directive,
-# but compose also interpolates POSTGRES_PASSWORD for the app DATABASE_URL,
-# so export it too:
-export POSTGRES_PASSWORD=$(grep '^POSTGRES_PASSWORD=' deploy/.env.prod | cut -d= -f2-)
+cd /opt/cc/app                                            # wherever this repo is checked out
+cp .env.example .env
 ```
 
-## Step 4 — Pull + start
+Edit `.env`:
 
 ```bash
-docker pull "$CC_IMAGE"
-docker compose --env-file deploy/.env.prod up -d db
-# wait for db healthy, then a one-off batch (exits when done):
-docker compose --env-file deploy/.env.prod run --rm app --workers 3 --batch-name "first-run"
+IMAGE=registry.internal/team/cc-pipeline:cpu-<sha>
+
+DATA_DIR=/var/lib/cc/data
+ADAPTERS_DIR=/opt/cc/models/adapters
+HF_CACHE_DIR=/opt/cc/models/huggingface
+
+HF_HUB_OFFLINE=1
+TRANSFORMERS_OFFLINE=1
+
+WHISPER_ADAPTER_PATH=/adapters/whisper_trained_LoRa_adaptator
+
+VLLM_BASE_URL=http://<vllm-host>:8080/v1                  # or http://localhost:8080/v1
+GEMINI_API_KEY=                                            # empty if blocked
+POSTGRES_PASSWORD=<strong-password>
 ```
 
-The first app run creates the schema (`CREATE TABLE IF NOT EXISTS` + the
-idempotent `ALTER` migrations) and processes whatever is in
+### SELinux note
+
+RHEL with SELinux requires Docker to relabel bind mounts. Edit
+`compose.yaml` and append `:Z` to the three `app` volume mounts:
+
+```yaml
+    volumes:
+      - ${DATA_DIR:-./data}:/app/data:Z
+      - ${ADAPTERS_DIR:-./models}:/adapters:Z
+      - ${HF_CACHE_DIR:-${HOME}/.cache/huggingface}:/hf:Z
+```
+
+Do this only on the SELinux host — adding `:Z` on a non-SELinux dev box
+silently breaks mounts.
+
+### Run
+
+```bash
+make up                                                   # start postgres
+make run ARGS="--workers 3 --batch-name first-run"
+```
+
+First run creates the schema (`CREATE TABLE IF NOT EXISTS` + idempotent
+`ALTER … ADD COLUMN IF NOT EXISTS`) and processes whatever audio sits in
 `/var/lib/cc/data/audio_files`.
 
-## Step 5 — Verify
+### Schedule the nightly batch
 
-```bash
-# DB rows
-docker compose --env-file deploy/.env.prod exec db \
-    psql -U cc_pipeline -d call_center -c \
-    "SELECT batch_id, file_count, success_count, error_count, review_count FROM batch_runs ORDER BY started_at DESC LIMIT 3;"
-
-# Archived files moved out of input
-ls /var/lib/cc/data/audio_files/processed_$(date +%Y%m%d)/completed/ | head
-
-# Logs
-docker compose --env-file deploy/.env.prod logs app | tail -40
-```
-
-You want to see `✅ ResultsStore ready (PostgreSQL)`, `✅ Silero VAD loaded`,
-`Loading base Whisper`, and per-call `[done] COMPLETE` lines.
-
-## Scheduling the nightly batch
-
-Run the one-off `docker compose run --rm app ...` from cron or a systemd timer
-on the VM. Example systemd timer (`/etc/systemd/system/cc-nightly.{service,timer}`):
+Two options. The simpler is a systemd timer that invokes `make run`:
 
 ```ini
-# cc-nightly.service
+# /etc/systemd/system/cc-nightly.service
 [Service]
 Type=oneshot
-WorkingDirectory=/opt/cc/app          # where this repo's compose.yaml lives
-Environment=CC_IMAGE=<registry>/<team>/cc-pipeline:<sha>
-Environment=CC_DATA_DIR=/var/lib/cc/data
-Environment=CC_MODELS_DIR=/opt/cc/models
-ExecStart=/usr/bin/docker compose --env-file deploy/.env.prod run --rm app --workers 3 --batch-name nightly
-```
+WorkingDirectory=/opt/cc/app
+ExecStart=/usr/bin/make run ARGS=--workers\ 3\ --batch-name\ nightly
 
-```ini
-# cc-nightly.timer
+# /etc/systemd/system/cc-nightly.timer
 [Timer]
 OnCalendar=*-*-* 22:00:00
 Persistent=true
@@ -217,48 +199,51 @@ WantedBy=timers.target
 sudo systemctl enable --now cc-nightly.timer
 ```
 
-The batch is idempotent: if a run is interrupted, the next run skips files
-already marked COMPLETE (deterministic content-hashed `call_id` +
-`is_already_processed`). ERROR / unprocessed files stay in the input dir and
-are retried automatically.
+The batch is idempotent: a previous COMPLETE run won't be reprocessed
+(content-hashed `call_id` + `is_already_processed` in the storage layer);
+ERROR / unprocessed files stay in the input dir and are retried.
 
 ## Rollback
 
 ```bash
-export CC_IMAGE=<registry>/<team>/cc-pipeline:<previous-sha>
-docker pull "$CC_IMAGE"
-docker compose --env-file deploy/.env.prod up -d
+# Edit .env: IMAGE=registry.internal/team/cc-pipeline:cpu-<previous-sha>
+docker pull "$(grep '^IMAGE=' .env | cut -d= -f2-)"
+make down && make up
 ```
 
-Image is the only thing that changes; models, data, and DB are untouched.
+Models, data, and DB are untouched. Three minutes.
 
-## Future: moving GPU components to a separate env
+## Future GPU env
 
-Classification + sentiment (and later refinement) are URL-driven. When a GPU
-env hosts vLLM, change one line in `deploy/.env.prod`:
+Classification, sentiment, and (eventually) refinement are all URL-driven.
+When vLLM moves to a separate GPU env:
 
 ```bash
+# In .env:
 VLLM_BASE_URL=http://gpu-env.internal:8080/v1
 ```
 
-and restart the app container. No image rebuild, no code change. Whisper
-transcription staying on the CPU VM is unchanged; moving it to the GPU env
-would be a future code change (a remote-Whisper HTTP client), out of scope
-for this deployment.
-
-## SELinux note (RHEL)
-
-The bind mounts in `compose.yaml` use the `:Z` suffix so Docker relabels them
-with the right SELinux context. If you see `Permission denied` reading
-`/app/data` or `/opt/cc/models` despite correct Unix ownership, that's
-SELinux — confirm the `:Z` is present, or check `ausearch -m avc -ts recent`.
+…then restart the app. No image rebuild, no code change. Moving Whisper
+transcription to the GPU env later would be a separate code change (a
+remote-Whisper HTTP client) — out of scope for this deployment.
 
 ## Common issues
 
 | Symptom | Cause / fix |
 |---|---|
-| `OSError ... huggingface.co` at startup | Model not staged, or `HF_HOME` wrong. Re-run stage_models unpack; confirm `HF_HOME=/opt/cc/models/huggingface`. |
-| `Adapter was trained on X but base is Y` warning | `WHISPER_BASE_MODEL_ID` doesn't match the adapter's base. Align it. |
-| App can't reach DB | `db` not healthy yet, or `DATABASE_URL` host wrong. Compose sets it to the `db` service automatically; don't override in the env file. |
-| `Permission denied` on mounts | Host dir not owned by uid 1000, or missing `:Z`. `chown -R 1000:1000` + keep `:Z`. |
-| Every call MANUAL_REVIEW | Gemini unreachable (`refinement_score=0`). Expected if `GEMINI_API_KEY` empty; wire local refinement LLM when ready. |
+| `set POSTGRES_PASSWORD in .env` at start | `.env` missing or `POSTGRES_PASSWORD=` empty. Set it. |
+| `Permission denied` on `/app/data` or `/adapters` | Host dirs not owned by uid 1000. `sudo chown -R 1000:1000 <path>`. On RHEL, also confirm `:Z` is on the volume specs. |
+| `OSError ... huggingface.co` at startup with `HF_HUB_OFFLINE=1` | Cache incomplete. Verify `ls $HF_CACHE_DIR/hub/models--openai--whisper-large-v3/snapshots/*/`. Re-stage if needed. |
+| `Adapter was trained on X but base is Y` warning | `WHISPER_BASE_MODEL_ID` doesn't match the adapter's base. Align them. |
+| App can't reach the DB | `db` not healthy yet, or `POSTGRES_PASSWORD` mismatch between `.env` reads. `make up && make logs` and look at the db container. |
+| Every call lands in `MANUAL_REVIEW` | Gemini unreachable or key empty (`refinement_score=0`). Expected if the prod VM can't reach Gemini; the local refinement LLM swap will fix it. |
+| `host.docker.internal` not resolving | Linux Docker — the `extra_hosts: host.docker.internal:host-gateway` in `compose.yaml` is required and is already there. If it still fails, the host firewall is blocking the bridge gateway. |
+| GPU image runs on a CPU box | The cu130 image will try to load CUDA libs and fail. Use the CPU image on CPU hosts. |
+
+## Alternative path — host PostgreSQL
+
+If you'd rather not run Postgres in a container (e.g., the VM has a managed
+PG service), comment out the `db` service in `compose.yaml`, override
+`DATABASE_URL` in `.env`, and provision the role + database once using
+`scripts/setup_postgres.sh`. This is the alternative; the default path is
+the container.

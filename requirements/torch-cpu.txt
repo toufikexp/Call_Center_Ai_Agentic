@@ -1,0 +1,7 @@
+# CPU-only torch stack. Used by the cc-pipeline:cpu image and by CPU-only
+# dev installs (`pip install -r requirements/base.txt -r requirements/torch-cpu.txt`).
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+torch==2.9.1
+torchaudio==2.9.1
+torchvision==0.24.1

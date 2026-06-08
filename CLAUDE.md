@@ -18,21 +18,30 @@ quality gate → subject classification → customer satisfaction.
 
 ## How to run
 
+Two interchangeable ways:
+
+**Venv (existing dev workflow)**:
 ```bash
-# 1. Create venv and install deps (CUDA build of torch by default)
-python -m venv cc_agentic_env
-source cc_agentic_env/bin/activate
-pip install -r requirements.txt
-
-# 2. Configure environment
-cp .env.example .env       # then edit GEMINI_API_KEY, VLLM_BASE_URL, etc.
-
-# 3. Run the pipeline
-python main.py path/to/audio.mp3
+python -m venv cc_agentic_env && source cc_agentic_env/bin/activate
+pip install -r requirements.txt       # GPU torch by default
+cp .env.example .env                  # edit GEMINI_API_KEY, etc.
+python main.py path/to/audio.mp3      # single file
+python -m src.batch run               # batch from $INPUT_DIR
 ```
 
-Outputs land in `data/results/` as JSON; chunked audio (for files >30s) lands
-in `data/chunks/`.
+**Docker (used in prod, also fine for dev)**:
+```bash
+make build                            # CPU image; `make build TORCH=gpu` for cu130
+cp .env.example .env                  # edit GEMINI_API_KEY, POSTGRES_PASSWORD
+make up                               # start postgres
+make smoke                            # 3-file batch
+make run ARGS="--workers 4"           # full batch with custom args
+make help                             # all targets
+```
+
+Same compose + Makefile work in dev (WSL) and prod (RHEL) — only `.env` values
+change. See `docs/runbooks/deployment.md`. Outputs land in `data/results/` as
+JSON; processed files move to `data/audio_files/processed_<YYYYMMDD>/{completed,manual_review}/`.
 
 ## External dependencies the pipeline expects at runtime
 

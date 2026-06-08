@@ -3,11 +3,7 @@ __pycache__/
 *.pyc
 .env
 .env.*
-deploy/.env.prod
-deploy/.env.*
-!deploy/env.prod.example
-!deploy/env.dev.example
-cc-models*.tar.gz
+!.env.example
 .cursor/
 .vscode/
 push_manual.sh

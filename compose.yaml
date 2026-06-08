@@ -1,58 +1,68 @@
-# Docker Compose for the Call Center pipeline + PostgreSQL.
+# Single compose file — works for both dev (WSL) and prod (RHEL).
 #
-# Usage on the prod RHEL 9 VM (after `docker pull <registry>/cc-pipeline:<tag>`):
-#   CC_IMAGE=<registry>/cc-pipeline:<tag> docker compose --env-file deploy/.env.prod up
+# Topology: postgres + app. Everything that differs between environments
+# (image tag, paths, credentials, offline flags) is read from `.env`.
 #
-# Or for a one-off batch run that exits when done:
-#   CC_IMAGE=... docker compose --env-file deploy/.env.prod run --rm app --workers 3
+# Typical commands (via Makefile):
+#   make up      # docker compose --env-file .env up -d db
+#   make smoke   # docker compose --env-file .env run --rm app --limit 3 ...
+#   make psql    # docker compose --env-file .env exec db psql -U ...
+#   make down    # docker compose --env-file .env down
 #
-# Notes:
-# - Models are bind-mounted from the host; they are NOT in the image.
-# - The `:Z` suffix on bind mounts relabels them for SELinux (required on RHEL).
-#   Drop the `:Z` if running on a non-SELinux host.
-# - PostgreSQL data persists in the named volume `pgdata`.
+# Prod-specific notes (RHEL with SELinux):
+#   - Append `:Z` to each volume mount (`./data:/app/data` → `./data:/app/data:Z`)
+#     so Docker relabels the host directory for SELinux.
+#   - Set absolute paths in `.env`: DATA_DIR, ADAPTERS_DIR, HF_CACHE_DIR.
+#   - Set HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 in `.env`.
 
 services:
+  # -------------------------------------------------------------------------
+  # PostgreSQL — analytics + idempotency
+  # -------------------------------------------------------------------------
   db:
     image: postgres:16
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-cc_pipeline}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in the env file}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
       POSTGRES_DB: ${POSTGRES_DB:-call_center}
     volumes:
       - pgdata:/var/lib/postgresql/data
-    # Exposed on localhost only; the app talks to it over the compose network.
-    # Uncomment to reach it from the host (e.g. DBeaver via an SSH tunnel):
-    # ports:
-    #   - "127.0.0.1:5432:5432"
+    ports:
+      # Reachable from the host on 5432 for DBeaver/psql. Comment out in
+      # prod if you don't want the port exposed beyond the compose network.
+      - "127.0.0.1:5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-cc_pipeline} -d ${POSTGRES_DB:-call_center}"]
-      interval: 10s
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-cc_pipeline} -d $${POSTGRES_DB:-call_center}"]
+      interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
+  # -------------------------------------------------------------------------
+  # Application — one-shot batch runner
+  # -------------------------------------------------------------------------
   app:
-    image: ${CC_IMAGE:?set CC_IMAGE to the registry image tag}
+    image: ${IMAGE:-cc-pipeline:cpu}
     depends_on:
       db:
         condition: service_healthy
+    # Pipeline-level configuration: read from .env, passed to the container.
     env_file:
-      - deploy/.env.prod
-    # DATABASE_URL points at the `db` service over the compose network,
-    # overriding whatever host/port is in the env file.
+      - .env
+    # Compose-level overrides for things only meaningful inside the network.
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-cc_pipeline}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-call_center}
       STORAGE_ENABLE: "1"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-cc_pipeline}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-call_center}
+    extra_hosts:
+      # Lets the container reach a service on the host machine (e.g. vLLM
+      # at http://host.docker.internal:8080). Harmless in prod when unused.
+      - "host.docker.internal:host-gateway"
     volumes:
-      # Audio in/out + logs + archive. Host path on the left; container path
-      # matches the INPUT_DIR / ARCHIVE_DIR / output_dir in the env file.
-      - ${CC_DATA_DIR:-./data}:/app/data:Z
-      # Pre-staged Whisper base + LoRA adapter (HF cache layout).
-      - ${CC_MODELS_DIR:-/opt/cc/models}:/opt/cc/models:Z
-    # Override the default CMD as needed:
-    #   docker compose run --rm app --workers 3 --batch-name nightly
-    command: ["--workers", "3"]
+      - ${DATA_DIR:-./data}:/app/data
+      - ${ADAPTERS_DIR:-./models}:/adapters
+      - ${HF_CACHE_DIR:-${HOME}/.cache/huggingface}:/hf
+    # Default args. Override with `make run ARGS="--workers 4 --batch-name X"`.
+    command: ["--workers", "2"]
 
 volumes:
   pgdata:

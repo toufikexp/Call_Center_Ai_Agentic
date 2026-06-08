@@ -1,64 +1,91 @@
-# Production image for the Call Center AI Agentic Pipeline (CPU-only).
+# syntax=docker/dockerfile:1.7
 #
-# Build (dev box with internet):
-#   docker build -t <registry>/cc-pipeline:<tag> .
-# Push:
-#   docker push <registry>/cc-pipeline:<tag>
-# Pull + run (prod RHEL 9 VM):
-#   docker pull <registry>/cc-pipeline:<tag>
-#   docker compose up   (see compose.yaml)
+# One Dockerfile, two variants. Build via the Makefile:
+#   make build              # → cc-pipeline:cpu (TORCH_VARIANT=cpu)
+#   make build TORCH=gpu    # → cc-pipeline:gpu (TORCH_VARIANT=cu130)
 #
-# Models are NOT baked into the image — they are bind-mounted at runtime
-# (see compose.yaml / deployment runbook). This keeps the image ~1.5 GB and
-# lets the LoRA adapter change without an image rebuild.
+# Models are NOT in the image. The runtime stage mounts them at /adapters
+# and /hf via compose. Offline behaviour is controlled by HF_HUB_OFFLINE
+# and TRANSFORMERS_OFFLINE in `.env`, not by anything baked here.
+#
+# Multi-stage layout:
+#   builder  — has build-essential + pip cache, installs deps, bakes Silero
+#   runtime  — only runtime libs; copies site-packages and Silero from builder
 
-FROM python:3.12-slim
+ARG PYTHON_VERSION=3.12-slim
+ARG TORCH_VARIANT=cpu
 
-# --- System libraries the pipeline needs at runtime ---
-#   ffmpeg     : audioread/librosa fallback for malformed WAV + format support
-#   libsndfile1: soundfile backend
-#   libgomp1   : OpenMP runtime for torch/numpy on CPU
-# Pinned-clean apt install, then cache cleanup to keep the layer small.
+# ---------------------------------------------------------------------------
+# Stage 1: builder
+# ---------------------------------------------------------------------------
+FROM python:${PYTHON_VERSION} AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
+        build-essential \
         ffmpeg \
         libsndfile1 \
         libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    # Offline by default in prod — no HF Hub / torch.hub network calls at runtime.
-    # Override to 0 only if you intentionally want online behaviour.
-    HF_HUB_OFFLINE=1 \
-    TRANSFORMERS_OFFLINE=1
+WORKDIR /app
+
+# Re-declare ARG (multi-stage builds reset args at each FROM)
+ARG TORCH_VARIANT
+
+COPY requirements/ /app/requirements/
+
+# Install base deps + the torch variant matching this build.
+# pip resolves --extra-index-url from the variant file's header.
+RUN pip install --upgrade pip \
+    && pip install \
+        -r /app/requirements/base.txt \
+        -r /app/requirements/torch-${TORCH_VARIANT}.txt
+
+# Bake Silero VAD weights into the builder's torch hub cache so the runtime
+# stage never reaches the network for VAD. Copied across in stage 2.
+RUN python -c "from silero_vad import load_silero_vad; load_silero_vad()"
+
+# ---------------------------------------------------------------------------
+# Stage 2: runtime
+# ---------------------------------------------------------------------------
+FROM python:${PYTHON_VERSION} AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/hf
+
+# Runtime system libs only — no compilers, no headers.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ffmpeg \
+        libsndfile1 \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 1000 app \
+    && mkdir -p /app/data /adapters /hf \
+    && chown -R app:app /app /hf
+
+# Bring installed packages + binaries + Silero cache from builder.
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
+COPY --from=builder /usr/local/bin /usr/local/bin
+COPY --from=builder --chown=app:app /root/.cache /home/app/.cache
 
 WORKDIR /app
 
-# --- Python deps (CPU torch stack) ---
-# Copy only the requirements first so this layer caches across code changes.
-COPY deploy/requirements.cpu.txt /app/deploy/requirements.cpu.txt
-RUN pip install --upgrade pip \
-    && pip install -r /app/deploy/requirements.cpu.txt
+# Application code last — biggest layer to change between builds, so it
+# stays on top to keep the deps layer cached.
+COPY --chown=app:app src/ /app/src/
+COPY --chown=app:app main.py /app/main.py
 
-# --- Bake the Silero VAD weights into the image ---
-# The silero-vad pip package downloads its ONNX/JIT weights on first
-# load_silero_vad() call. Trigger it now (build host has internet) so the
-# prod container never reaches the network for VAD.
-RUN python -c "from silero_vad import load_silero_vad; load_silero_vad()"
+USER app
 
-# --- Application code ---
-COPY src/ /app/src/
-COPY main.py /app/main.py
-
-# Non-root user; data + model dirs are bind-mounted at runtime.
-RUN useradd --create-home --uid 1000 appuser \
-    && mkdir -p /app/data /opt/cc/models \
-    && chown -R appuser:appuser /app /opt/cc
-USER appuser
-
-# Default command processes a batch from the configured input dir. Override
-# in compose / docker run for one-off single-file processing or healthchecks.
+# Default to the batch runner. Compose overrides via `command:` for the
+# `app` service; users override per-invocation with `make run ARGS="..."`.
 ENTRYPOINT ["python", "-m", "src.batch", "run"]
-CMD ["--workers", "3"]
+CMD ["--workers", "2"]
