@@ -47,10 +47,6 @@ RUN pip install --upgrade pip \
         -r /app/requirements/base.txt \
         -r /app/requirements/torch-${TORCH_VARIANT}.txt
 
-# Bake Silero VAD weights into the builder's torch hub cache so the runtime
-# stage never reaches the network for VAD. Copied across in stage 2.
-RUN python -c "from silero_vad import load_silero_vad; load_silero_vad()"
-
 # ---------------------------------------------------------------------------
 # Stage 2: runtime
 # ---------------------------------------------------------------------------
@@ -71,10 +67,11 @@ RUN apt-get update \
     && mkdir -p /app/data /adapters /hf \
     && chown -R app:app /app /hf
 
-# Bring installed packages + binaries + Silero cache from builder.
+# Bring installed packages + binaries from builder. Silero VAD weights ship
+# inside the `silero-vad` PyPI package itself (under site-packages), so they
+# come along automatically with the line above — no separate cache copy.
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
-COPY --from=builder --chown=app:app /root/.cache /home/app/.cache
 
 WORKDIR /app
 
