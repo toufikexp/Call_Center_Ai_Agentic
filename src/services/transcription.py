@@ -144,6 +144,16 @@ class TranscriptionService(BaseService):
                 ) from e
         else:
             kwargs["torch_dtype"] = self._dtype
+            # When `accelerate` is installed, from_pretrained defaults to
+            # low_cpu_mem_usage=True, which inits weights on the `meta` device
+            # and relies on a later `.to(device)` to materialize them. The CPU
+            # path below skips that `.to()`, so on CPU the weights would stay
+            # on meta — PEFT then can't copy the LoRA in (the "non-meta to meta
+            # is a no-op" warning) and generate() fails with "Tensor on device
+            # meta...". Force eager materialization so real tensors exist at
+            # load time, on both CPU and GPU.
+            kwargs["low_cpu_mem_usage"] = False
+            kwargs["device_map"] = None
         return WhisperForConditionalGeneration.from_pretrained(
             model_id_or_path, **kwargs
         )
