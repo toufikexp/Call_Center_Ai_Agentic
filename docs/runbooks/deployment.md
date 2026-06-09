@@ -37,7 +37,75 @@ make logs              # tail compose logs
 make down              # stop (keeps DB volume)
 make clean             # stop + wipe DB volume
 make push REGISTRY=registry.internal/team TAG=cpu-$(git rev-parse --short HEAD)
+
+# Long-running HTTP API (alternative to one-shot batches)
+make serve             # start db + server (detached). Listens on 127.0.0.1:8000
+make serve-logs        # tail server logs
+make serve-shell       # bash inside the server container
+make serve-down        # stop the server (DB stays up)
+make server-status     # health + recent jobs
 ```
+
+## Long-running server (`make serve`)
+
+When you want **models to stay loaded between runs** instead of paying the
+~5–10 s reload on every batch, run the pipeline as a long-lived HTTP service.
+
+- One process, one warm `CallAnalysisPipeline`. First job triggers lazy
+  model load; subsequent jobs reuse it.
+- Async API: `POST /jobs` returns a job id instantly; a worker thread runs
+  the pipeline; `GET /jobs/{id}` polls.
+- Per-job parallelism is `SERVER_WORKERS` (default 1). Keep it at 1 on CPU
+  — Whisper-large-v3 saturates a single thread. Raise on GPU.
+
+### Endpoints
+
+| Method | Path | Notes |
+|---|---|---|
+| `GET`  | `/health` | Liveness — always returns 200 once the process is up. |
+| `GET`  | `/ready`  | Readiness — `ready: true` once the worker pool is initialised. |
+| `POST` | `/jobs`   | Submit a job. Two body shapes: JSON `{"audio_path": "..."}` OR `multipart/form-data` with field `audio`. Returns `202` with the job record. |
+| `GET`  | `/jobs/{id}` | Fetch a job by id. |
+| `GET`  | `/jobs?limit=N` | List the N most recent jobs (default 50). |
+
+### Example
+
+```bash
+# Submit a path that already exists under the data mount
+curl -X POST -H 'Content-Type: application/json' \
+     -d '{"audio_path":"audio_files/399001002190006.wav"}' \
+     http://127.0.0.1:8000/jobs
+
+# Upload a file directly
+curl -F "audio=@/tmp/sample.wav" http://127.0.0.1:8000/jobs
+
+# Poll
+curl http://127.0.0.1:8000/jobs/<job_id>
+```
+
+### Where results land (unchanged)
+
+The server doesn't introduce a new output format. Each finished job
+produces the same artifacts as the batch runner:
+
+- `data/results/<basename>_<short_id>_result.json` — durable per-call JSON.
+- A row in `call_results` (when storage is enabled), grouped under one
+  `batch_id` per server lifetime (notes = `server-session-<timestamp>`).
+
+The job record (`GET /jobs/{id}`) carries a small summary and the path to
+the JSON file; query the DB or read the JSON for the full result.
+
+### Configuration
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `SERVER_HOST_PORT` | `8000` | Host port the server is exposed on. |
+| `SERVER_WORKERS`   | `1`    | Job worker threads. CPU: 1. GPU: 2–4. |
+| `SERVER_LOG_LEVEL` | `info` | uvicorn / python logging level. |
+
+The container always listens on `0.0.0.0:8000`; `SERVER_HOST_PORT` only
+affects the host-side bind in compose. Default binding is `127.0.0.1`.
+
 
 ## Dev (WSL) workflow
 

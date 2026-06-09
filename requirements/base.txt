@@ -51,3 +51,8 @@ silero-vad>=4.0
 
 # --- Persistence (PostgreSQL) ---
 psycopg[binary]>=3.1
+
+# --- HTTP server (long-lived job API; alternative to the one-shot batch CLI) ---
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.32,<1.0
+python-multipart>=0.0.9

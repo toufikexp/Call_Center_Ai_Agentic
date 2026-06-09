@@ -12,6 +12,7 @@ push_with_credentials.sh
 # Data directories (keep structure, exclude contents)
 data/audio_files/*
 !data/audio_files/.gitkeep
+data/audio_files_uploads/
 data/logs/*
 !data/logs/.gitkeep
 data/results/*

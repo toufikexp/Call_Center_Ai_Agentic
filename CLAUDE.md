@@ -9,9 +9,13 @@ call center audio (Algerian Darija / Arabic) into structured analytics:
 preprocess (channel split + VAD) → transcribe (Whisper + LoRA) → refine →
 quality gate → subject classification → customer satisfaction.
 
-- Entry point: `main.py`
+- Entry points:
+  - `main.py` — single-file CLI
+  - `python -m src.batch run` — one-shot batch runner (parallel workers)
+  - `python -m src.server` — long-running FastAPI job API (warm models)
 - Orchestration: `src/pipeline/orchestrator.py` (LangGraph `StateGraph`)
 - Service layer: `src/services/` (one file per stage)
+- HTTP layer: `src/server/` (FastAPI + in-process job store; thin wrapper, no pipeline changes)
 - Configuration: `src/config/config.py` (Pydantic) + `src/config/classification_schema.json`
 - State / result models: `src/core/state.py`
 - Base service abstraction: `src/core/base.py`

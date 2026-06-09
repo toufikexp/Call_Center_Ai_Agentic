@@ -1,0 +1,246 @@
+"""In-process job store + worker pool for the HTTP server.
+
+Design notes
+------------
+- ONE long-lived `CallAnalysisPipeline` is shared across all jobs. Models
+  load lazily on the first job and stay resident — that's the whole point
+  of running the server vs. the one-shot batch container.
+- A `ThreadPoolExecutor` runs jobs. Default `max_workers=1` because
+  Whisper-large-v3 on CPU is the bottleneck and the transcription service's
+  internal `_gen_lock` already serialises generate() calls. Raising it on
+  GPU is fine — set `SERVER_WORKERS` in `.env`.
+- The pipeline already records to the JSON output dir AND to Postgres (when
+  storage is enabled), so this module deliberately does NOT duplicate that.
+  Job records here are *metadata*; the durable artifacts are the JSON file
+  under `data/results/` and the `call_results` row.
+- The orchestrator's `start_batch`/`finish_batch` use a single field on the
+  pipeline instance, so we wrap the whole server lifetime in one batch
+  rather than per-job, keeping `_current_batch_id` race-free.
+"""
+from __future__ import annotations
+
+import logging
+import threading
+import time
+import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from src.config.config import get_settings
+from src.pipeline import CallAnalysisPipeline
+
+
+logger = logging.getLogger("server.jobs")
+
+
+class JobStatus(str, Enum):
+    QUEUED = "queued"
+    RUNNING = "running"
+    COMPLETE = "complete"
+    MANUAL_REVIEW = "manual_review"
+    ERROR = "error"
+
+
+@dataclass
+class JobRecord:
+    """Metadata for one submitted job. Result data lives on disk / in DB."""
+    job_id: str
+    audio_path: str
+    status: JobStatus = JobStatus.QUEUED
+    submitted_at: str = field(
+        default_factory=lambda: datetime.now(timezone.utc).isoformat()
+    )
+    started_at: Optional[str] = None
+    finished_at: Optional[str] = None
+    call_id: Optional[str] = None
+    # Small summary lifted from the pipeline result for cheap polling.
+    summary: Optional[Dict[str, Any]] = None
+    # Path to the JSON result file under data/results/, when produced.
+    result_path: Optional[str] = None
+    error: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = asdict(self)
+        d["status"] = self.status.value
+        return d
+
+
+class JobStore:
+    """Thread-safe job registry + worker pool.
+
+    One instance per server process. Owns the shared pipeline and the
+    executor. Construction is cheap; the pipeline lazy-loads on the first
+    `submit()`.
+    """
+
+    def __init__(self, workers: int = 1, max_history: int = 500):
+        self._lock = threading.Lock()
+        self._jobs: Dict[str, JobRecord] = {}
+        # Order of submission, for /jobs listing without scanning the dict
+        # each time.
+        self._order: List[str] = []
+        self._max_history = max(50, int(max_history))
+
+        self._executor = ThreadPoolExecutor(
+            max_workers=max(1, int(workers)),
+            thread_name_prefix="job-worker",
+        )
+
+        self._settings = get_settings()
+        self._pipeline = CallAnalysisPipeline(self._settings)
+        # One batch per server lifetime — all jobs grouped under it for DB
+        # analytics. Safe because batch state on the pipeline is a single
+        # field and we set it exactly once here on the main thread.
+        notes = f"server-session-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        self._batch_id = self._pipeline.start_batch(notes=notes)
+        logger.info(
+            "Job store ready (workers=%d, batch_id=%s, output_dir=%s)",
+            workers,
+            self._batch_id or "<storage-disabled>",
+            self._settings.pipeline.output_dir,
+        )
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+    def shutdown(self, wait: bool = True) -> None:
+        logger.info("Shutting down job store (wait=%s)", wait)
+        try:
+            self._pipeline.finish_batch()
+        except Exception as e:  # pragma: no cover — defensive
+            logger.warning("finish_batch on shutdown failed: %s", e)
+        self._executor.shutdown(wait=wait, cancel_futures=not wait)
+
+    # ------------------------------------------------------------------
+    # Submission
+    # ------------------------------------------------------------------
+    def submit(self, audio_path: str) -> JobRecord:
+        job_id = uuid.uuid4().hex
+        record = JobRecord(job_id=job_id, audio_path=audio_path)
+        with self._lock:
+            self._jobs[job_id] = record
+            self._order.append(job_id)
+            self._evict_if_full()
+        self._executor.submit(self._run, job_id)
+        return record
+
+    def _evict_if_full(self) -> None:
+        """Drop oldest finished jobs to bound memory. Holds `self._lock`."""
+        overflow = len(self._order) - self._max_history
+        if overflow <= 0:
+            return
+        # Prefer to evict finished jobs first. Walk from oldest forward.
+        kept: List[str] = []
+        dropped = 0
+        terminal = {JobStatus.COMPLETE, JobStatus.MANUAL_REVIEW, JobStatus.ERROR}
+        for jid in self._order:
+            if dropped < overflow:
+                rec = self._jobs.get(jid)
+                if rec is not None and rec.status in terminal:
+                    self._jobs.pop(jid, None)
+                    dropped += 1
+                    continue
+            kept.append(jid)
+        self._order = kept
+
+    # ------------------------------------------------------------------
+    # Lookups
+    # ------------------------------------------------------------------
+    def get(self, job_id: str) -> Optional[JobRecord]:
+        with self._lock:
+            rec = self._jobs.get(job_id)
+            # Return a copy so callers can't mutate live state.
+            return JobRecord(**asdict(rec)) if rec else None
+
+    def list(self, limit: int = 50) -> List[JobRecord]:
+        with self._lock:
+            ids = self._order[-max(1, limit):][::-1]
+            return [JobRecord(**asdict(self._jobs[i])) for i in ids if i in self._jobs]
+
+    # ------------------------------------------------------------------
+    # Worker
+    # ------------------------------------------------------------------
+    def _run(self, job_id: str) -> None:
+        with self._lock:
+            rec = self._jobs.get(job_id)
+            if rec is None:
+                return
+            rec.status = JobStatus.RUNNING
+            rec.started_at = datetime.now(timezone.utc).isoformat()
+            audio_path = rec.audio_path
+
+        t0 = time.time()
+        try:
+            state = self._pipeline.run(audio_path)
+            result = state["result"]
+            status_val = result.status.value
+            mapped = _STATUS_MAP.get(status_val, JobStatus.ERROR)
+
+            summary = {
+                "call_id": result.call_id,
+                "status": status_val,
+                "confidence": float(result.confidence_score or 0.0),
+                "refinement_score": float(result.refinement_score or 0.0),
+                "subject": result.subject,
+                "sub_subject": result.sub_subject,
+                "satisfaction_score": float(result.satisfaction_score or 0.0),
+                "transcript_length": len(result.transcript or ""),
+            }
+            result_path = _result_json_path(self._settings, audio_path, result.call_id)
+
+            with self._lock:
+                rec2 = self._jobs.get(job_id)
+                if rec2 is None:
+                    return
+                rec2.status = mapped
+                rec2.finished_at = datetime.now(timezone.utc).isoformat()
+                rec2.call_id = result.call_id
+                rec2.summary = summary
+                rec2.result_path = result_path
+                if status_val == "ERROR":
+                    rec2.error = result.error_message or "pipeline reported ERROR"
+
+            logger.info(
+                "Job %s finished in %.2fs → %s (call_id=%s)",
+                job_id, time.time() - t0, status_val, result.call_id,
+            )
+        except FileNotFoundError as e:
+            self._mark_error(job_id, f"audio not found: {e}")
+        except Exception as e:  # pragma: no cover — defensive
+            logger.exception("Job %s failed: %s", job_id, e)
+            self._mark_error(job_id, f"{type(e).__name__}: {e}")
+
+    def _mark_error(self, job_id: str, message: str) -> None:
+        with self._lock:
+            rec = self._jobs.get(job_id)
+            if rec is None:
+                return
+            rec.status = JobStatus.ERROR
+            rec.finished_at = datetime.now(timezone.utc).isoformat()
+            rec.error = message
+
+
+_STATUS_MAP = {
+    "COMPLETE": JobStatus.COMPLETE,
+    "MANUAL_REVIEW": JobStatus.MANUAL_REVIEW,
+    "ERROR": JobStatus.ERROR,
+    "PENDING": JobStatus.ERROR,
+    "IN_PROGRESS": JobStatus.ERROR,
+}
+
+
+def _result_json_path(settings, audio_path: str, call_id: str) -> Optional[str]:
+    """Reconstruct the path that orchestrator._save_node writes to.
+
+    Returns the relative path if it exists, None otherwise.
+    """
+    if not call_id:
+        return None
+    audio_basename = Path(audio_path).stem
+    unique = call_id.split("_")[-1] if "_" in call_id else call_id[-8:]
+    path = Path(settings.pipeline.output_dir) / f"{audio_basename}_{unique}_result.json"
+    return str(path) if path.exists() else str(path)

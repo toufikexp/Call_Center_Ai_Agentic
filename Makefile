@@ -27,7 +27,7 @@ COMPOSE       ?= docker compose --env-file .env
 # Export IMAGE so compose interpolates ${IMAGE} from this Makefile.
 export IMAGE
 
-.PHONY: help build smoke run up down clean shell logs psql push
+.PHONY: help build smoke run up down clean shell logs psql push serve serve-down serve-logs serve-shell server-status
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -79,3 +79,31 @@ down: ## Stop services (keeps DB volume)
 
 clean: ## Stop services AND wipe the DB volume
 	$(COMPOSE) down -v
+
+# ---------------------------------------------------------------------------
+# Long-running HTTP server (alternative to one-shot batch runs)
+# ---------------------------------------------------------------------------
+serve: ## Start the HTTP server (detached). Listens on 127.0.0.1:8000
+	$(COMPOSE) up -d db server
+	$(COMPOSE) ps server
+	@echo
+	@echo "Health:  curl http://127.0.0.1:$${SERVER_HOST_PORT:-8000}/health"
+	@echo "Submit:  curl -X POST -H 'Content-Type: application/json' \\"
+	@echo "             -d '{\"audio_path\":\"audio_files/your.wav\"}' \\"
+	@echo "             http://127.0.0.1:$${SERVER_HOST_PORT:-8000}/jobs"
+
+serve-down: ## Stop the server (DB stays up — use `make down` to stop both)
+	$(COMPOSE) stop server
+	$(COMPOSE) rm -f server
+
+serve-logs: ## Tail the server logs
+	$(COMPOSE) logs -f --tail=200 server
+
+serve-shell: ## Open a shell in the running server container
+	$(COMPOSE) exec server bash
+
+server-status: ## Quick status: health + recent jobs
+	@curl -fsS http://127.0.0.1:$${SERVER_HOST_PORT:-8000}/health \
+	    && echo \
+	    && curl -fsS "http://127.0.0.1:$${SERVER_HOST_PORT:-8000}/jobs?limit=5" \
+	    || echo "Server not reachable on :$${SERVER_HOST_PORT:-8000}"

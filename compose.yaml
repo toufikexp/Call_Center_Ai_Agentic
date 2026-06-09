@@ -64,5 +64,44 @@ services:
     # Default args. Override with `make run ARGS="--workers 4 --batch-name X"`.
     command: ["--workers", "2"]
 
+  # -------------------------------------------------------------------------
+  # Server — long-lived HTTP job API (FastAPI + uvicorn).
+  # Same image as `app`, different command. Models load once on the first
+  # job and stay warm for subsequent requests.
+  # -------------------------------------------------------------------------
+  server:
+    image: ${IMAGE:-cc-pipeline:cpu}
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      STORAGE_ENABLE: "1"
+      DATABASE_URL: postgresql://${POSTGRES_USER:-cc_pipeline}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-call_center}
+      SERVER_HOST: "0.0.0.0"
+      SERVER_PORT: "8000"
+      SERVER_WORKERS: "${SERVER_WORKERS:-1}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ${DATA_DIR:-./data}:/app/data
+      - ${ADAPTERS_DIR:-./models}:/adapters
+      - ${HF_CACHE_DIR:-${HOME}/.cache/huggingface}:/hf
+    ports:
+      # Exposed on the host loopback by default. Comment out or change to
+      # `${SERVER_HOST_PORT:-8000}:8000` to bind externally.
+      - "127.0.0.1:${SERVER_HOST_PORT:-8000}:8000"
+    # Override the image's batch ENTRYPOINT to run the server module.
+    entrypoint: ["python", "-m", "src.server"]
+    command: []
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=2).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
 volumes:
   pgdata:
