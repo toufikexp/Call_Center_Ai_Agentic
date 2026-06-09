@@ -37,6 +37,9 @@ class BaseService(ABC):
             handler.setFormatter(formatter)
             logger.addHandler(handler)
             logger.setLevel(logging.INFO)
+            # Don't bubble up to root — root may have its own handler
+            # (e.g. uvicorn / basicConfig), which would emit each record twice.
+            logger.propagate = False
         return logger
     
     @abstractmethod

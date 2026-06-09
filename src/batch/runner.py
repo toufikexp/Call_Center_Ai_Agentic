@@ -118,6 +118,7 @@ class BatchRunner:
             )
             logger.addHandler(handler)
             logger.setLevel(logging.INFO)
+            logger.propagate = False
         return logger
 
     def _setup_batch_log_file(
