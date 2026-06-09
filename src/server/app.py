@@ -28,7 +28,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -117,31 +117,42 @@ def create_app() -> FastAPI:
 
     # ----- Job submission -------------------------------------------------
     @app.post("/jobs", status_code=202, response_model=JobResponse)
-    async def submit_job(
-        body: Optional[SubmitJobRequest] = None,
-        audio: Optional[UploadFile] = File(default=None),
-    ) -> JobResponse:
+    async def submit_job(request: Request) -> JobResponse:
         """Submit a job.
 
         Use EITHER a JSON body with `audio_path` OR a multipart upload with
-        a file field named `audio`. Not both.
+        a file field named `audio`. The two cannot be mixed in one endpoint
+        signature (a `File()` param forces FastAPI to treat the whole body
+        as multipart), so we branch on Content-Type from the raw request.
         """
         js = store.get("jobs")
         if js is None:
             raise HTTPException(503, "Job store not ready")
 
-        if audio is not None and body is not None and body.audio_path:
-            raise HTTPException(
-                400, "Provide either 'audio_path' OR a file upload, not both."
-            )
+        content_type = (request.headers.get("content-type") or "").lower()
 
-        if audio is not None:
+        if content_type.startswith("multipart/form-data"):
+            form = await request.form()
+            audio = form.get("audio")
+            if not isinstance(audio, UploadFile):
+                raise HTTPException(
+                    400, "multipart request must include a file field named 'audio'."
+                )
             audio_path = _save_upload(audio, upload_dir)
-        elif body is not None and body.audio_path:
-            audio_path = _resolve_input_path(body.audio_path, data_root)
+        elif content_type.startswith("application/json"):
+            try:
+                payload = await request.json()
+            except Exception:
+                raise HTTPException(400, "Body is not valid JSON.")
+            audio_path_raw = (payload or {}).get("audio_path")
+            if not audio_path_raw:
+                raise HTTPException(400, "JSON body must include 'audio_path'.")
+            audio_path = _resolve_input_path(str(audio_path_raw), data_root)
         else:
             raise HTTPException(
-                400, "Request must include either JSON {audio_path} or a file upload."
+                400,
+                "Send JSON (Content-Type: application/json, body {\"audio_path\": ...}) "
+                "or a multipart upload (field 'audio').",
             )
 
         if not Path(audio_path).exists():
