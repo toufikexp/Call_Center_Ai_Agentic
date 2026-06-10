@@ -1,0 +1,109 @@
+# Dedicated compose file for the Qwen / vLLM backing service.
+#
+# It is intentionally SEPARATE from compose.yaml: vLLM has its own image,
+# lifecycle, and (for CPU) its own build. The pipeline only needs
+# VLLM_BASE_URL pointed at whatever this serves.
+#
+# Reference (the current hand-run command this models):
+#   vllm ... --model Qwen/Qwen3-4B --reasoning-parser qwen3 \
+#            --gpu-memory-utilization 0.6 --max-model-len 8192
+#
+# Two profiles:
+#   docker compose -f compose.vllm.yaml --profile gpu up -d     # GPU (dev)
+#   docker compose -f compose.vllm.yaml --profile cpu up -d     # CPU (prod)
+#
+# Both publish the OpenAI-compatible API on the host at 127.0.0.1:8080, so
+# the pipeline's existing VLLM_BASE_URL=http://host.docker.internal:8080/v1
+# keeps working unchanged whether vLLM runs on CPU or GPU.
+#
+# ── OFFLINE (no internet) ────────────────────────────────────────────────
+# vLLM will try to reach the HF Hub unless told otherwise. To run air-gapped:
+#   1. ON A MACHINE WITH INTERNET, download the model into a local dir:
+#        pip install -U "huggingface_hub[cli]"
+#        huggingface-cli download Qwen/Qwen3-4B \
+#            --local-dir ./models/Qwen3-4B
+#   2. Copy ./models to the target host (same path or set MODELS_DIR).
+#   3. In .env set:
+#        MODELS_DIR=./models
+#        VLLM_MODEL=/models/Qwen3-4B      # local path, NOT the repo id
+#        HF_HUB_OFFLINE=1
+#        TRANSFORMERS_OFFLINE=1
+#   With VLLM_MODEL pointing at a local dir and the offline flags set, vLLM
+#   loads purely from disk and makes no network calls.
+
+x-vllm-common: &vllm-common
+  # The model: a HF repo id (online) OR an absolute local path (offline).
+  # Offline: set VLLM_MODEL=/models/Qwen3-4B in .env.
+  volumes:
+    - ${MODELS_DIR:-./models}:/models
+    - ${HF_CACHE_DIR:-${HOME}/.cache/huggingface}:/root/.cache/huggingface
+  environment: &vllm-env
+    HF_HOME: /root/.cache/huggingface
+    HF_HUB_OFFLINE: ${HF_HUB_OFFLINE:-0}
+    TRANSFORMERS_OFFLINE: ${TRANSFORMERS_OFFLINE:-0}
+  ports:
+    - "127.0.0.1:${VLLM_HOST_PORT:-8080}:8000"
+  ipc: host           # vLLM needs a large /dev/shm for tensor IPC
+  restart: unless-stopped
+
+services:
+  # =========================================================================
+  # GPU vLLM — dev. Mirrors the current hand-run command.
+  # =========================================================================
+  vllm-gpu:
+    <<: *vllm-common
+    profiles: ["gpu"]
+    # Pin a concrete tag in production. `latest` must be recent enough to
+    # support Qwen3 + `--reasoning-parser qwen3`.
+    image: ${VLLM_GPU_IMAGE:-vllm/vllm-openai:latest}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command:
+      - "--model"
+      - "${VLLM_MODEL:-Qwen/Qwen3-4B}"
+      - "--served-model-name"
+      - "Qwen/Qwen3-4B"
+      - "--reasoning-parser"
+      - "qwen3"
+      - "--gpu-memory-utilization"
+      - "${VLLM_GPU_MEM_UTIL:-0.6}"
+      - "--max-model-len"
+      - "${VLLM_MAX_MODEL_LEN:-8192}"
+
+  # =========================================================================
+  # CPU vLLM — prod. NOTE: there is no official prebuilt CPU image. Build it
+  # once from the vLLM repo, then this service runs it:
+  #   git clone https://github.com/vllm-project/vllm.git
+  #   cd vllm && docker build -f docker/Dockerfile.cpu -t vllm-cpu:local .
+  #
+  # WARNING: vLLM on CPU is much slower than on GPU, and Qwen3 reasoning mode
+  # emits long chains-of-thought before the answer — expect many seconds to
+  # minutes per request. For latency-sensitive CPU use, prefer a GGUF engine
+  # (llama.cpp / Ollama) and/or disable thinking. See docs/runbooks.
+  # =========================================================================
+  vllm-cpu:
+    <<: *vllm-common
+    profiles: ["cpu"]
+    image: ${VLLM_CPU_IMAGE:-vllm-cpu:local}
+    environment:
+      <<: *vllm-env
+      # KV-cache space in GiB on CPU RAM (vLLM CPU requires this).
+      VLLM_CPU_KVCACHE_SPACE: "${VLLM_CPU_KVCACHE_SPACE:-8}"
+      # Pin OpenMP threads to physical cores for throughput.
+      OMP_NUM_THREADS: "${VLLM_CPU_OMP_THREADS:-8}"
+    command:
+      - "--model"
+      - "${VLLM_MODEL:-Qwen/Qwen3-4B}"
+      - "--served-model-name"
+      - "Qwen/Qwen3-4B"
+      - "--reasoning-parser"
+      - "qwen3"
+      - "--device"
+      - "cpu"
+      - "--max-model-len"
+      - "${VLLM_MAX_MODEL_LEN:-8192}"

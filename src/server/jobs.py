@@ -47,7 +47,12 @@ class JobStatus(str, Enum):
 
 @dataclass
 class JobRecord:
-    """Metadata for one submitted job. Result data lives on disk / in DB."""
+    """Metadata for one submitted job. Result data lives on disk / in DB.
+
+    `job_id` is passed straight through to the pipeline as the `call_id`, so
+    `call_id == job_id` once the job starts running. To find a job in the
+    database: `SELECT * FROM call_results WHERE call_id = '<job_id>';`.
+    """
     job_id: str
     audio_path: str
     status: JobStatus = JobStatus.QUEUED
@@ -56,6 +61,7 @@ class JobRecord:
     )
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
+    # Equals job_id (set from the pipeline result once it completes).
     call_id: Optional[str] = None
     # Small summary lifted from the pipeline result for cheap polling.
     summary: Optional[Dict[str, Any]] = None
@@ -175,7 +181,11 @@ class JobStore:
 
         t0 = time.time()
         try:
-            state = self._pipeline.run(audio_path)
+            # Pass the API job_id straight through as the pipeline call_id so
+            # the value the client polls on IS the primary key of the durable
+            # row in `calls` / `call_results`. One id, traceable end to end —
+            # no separate job_id↔call_id mapping to keep.
+            state = self._pipeline.run(audio_path, call_id=job_id)
             result = state["result"]
             status_val = result.status.value
             mapped = _STATUS_MAP.get(status_val, JobStatus.ERROR)

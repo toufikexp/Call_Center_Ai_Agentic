@@ -1,23 +1,63 @@
 # Single compose file — works for both dev (WSL) and prod (RHEL).
 #
-# Topology: postgres + app. Everything that differs between environments
-# (image tag, paths, credentials, offline flags) is read from `.env`.
+# CPU vs GPU is selected with a Compose PROFILE, not a second file:
 #
-# Typical commands (via Makefile):
-#   make up      # docker compose --env-file .env up -d db
-#   make smoke   # docker compose --env-file .env run --rm app --limit 3 ...
-#   make psql    # docker compose --env-file .env exec db psql -U ...
-#   make down    # docker compose --env-file .env down
+#   docker compose --profile cpu up -d        # API server on CPU (default)
+#   docker compose --profile gpu up -d        # API server on GPU
+#
+#   docker compose --profile cpu-batch run --rm app     --limit 3   # batch, CPU
+#   docker compose --profile gpu-batch run --rm app-gpu --limit 3   # batch, GPU
+#
+# `db` has no profile, so it always starts. The CPU services use the
+# cc-pipeline:cpu image; the GPU services use cc-pipeline:gpu AND request an
+# NVIDIA device. To revert GPU→CPU you simply use --profile cpu again; the
+# GPU device reservation only exists on the *-gpu services.
+#
+# Everything that differs between environments (image tags, paths,
+# credentials, offline flags) is read from `.env`.
+#
+# Qwen / vLLM is a SEPARATE backing service — see compose.vllm.yaml. The app
+# only needs VLLM_BASE_URL pointed at it.
 #
 # Prod-specific notes (RHEL with SELinux):
-#   - Append `:Z` to each volume mount (`./data:/app/data` → `./data:/app/data:Z`)
-#     so Docker relabels the host directory for SELinux.
+#   - Append `:Z` to each volume mount so Docker relabels for SELinux.
 #   - Set absolute paths in `.env`: DATA_DIR, ADAPTERS_DIR, HF_CACHE_DIR.
 #   - Set HF_HUB_OFFLINE=1 and TRANSFORMERS_OFFLINE=1 in `.env`.
 
+# ---------------------------------------------------------------------------
+# Reusable fragments (YAML anchors) — keep CPU/GPU services DRY.
+# ---------------------------------------------------------------------------
+x-base-env: &base-env
+  STORAGE_ENABLE: "1"
+  DATABASE_URL: postgresql://${POSTGRES_USER:-cc_pipeline}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-call_center}
+
+x-svc-common: &svc-common
+  depends_on:
+    db:
+      condition: service_healthy
+  env_file:
+    - .env
+  extra_hosts:
+    # Lets the container reach a service on the host (e.g. vLLM at
+    # http://host.docker.internal:8080). Harmless when unused.
+    - "host.docker.internal:host-gateway"
+  volumes:
+    - ${DATA_DIR:-./data}:/app/data
+    - ${ADAPTERS_DIR:-./models}:/adapters
+    - ${HF_CACHE_DIR:-${HOME}/.cache/huggingface}:/hf
+
+# Value of a service's `deploy:` key — requests one NVIDIA GPU.
+x-gpu-deploy: &gpu-deploy
+  resources:
+    reservations:
+      devices:
+        - driver: nvidia
+          count: 1
+          capabilities: [gpu]
+
 services:
   # -------------------------------------------------------------------------
-  # PostgreSQL — analytics + idempotency
+  # PostgreSQL — analytics + idempotency. No profile → always starts.
   # -------------------------------------------------------------------------
   db:
     image: postgres:16
@@ -29,8 +69,6 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      # Reachable from the host on 5432 for DBeaver/psql. Comment out in
-      # prod if you don't want the port exposed beyond the compose network.
       - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-cc_pipeline} -d $${POSTGRES_DB:-call_center}"]
@@ -38,70 +76,71 @@ services:
       timeout: 5s
       retries: 10
 
-  # -------------------------------------------------------------------------
-  # Application — one-shot batch runner
-  # -------------------------------------------------------------------------
-  app:
-    image: ${IMAGE:-cc-pipeline:cpu}
-    depends_on:
-      db:
-        condition: service_healthy
-    # Pipeline-level configuration: read from .env, passed to the container.
-    env_file:
-      - .env
-    # Compose-level overrides for things only meaningful inside the network.
-    environment:
-      STORAGE_ENABLE: "1"
-      DATABASE_URL: postgresql://${POSTGRES_USER:-cc_pipeline}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-call_center}
-    extra_hosts:
-      # Lets the container reach a service on the host machine (e.g. vLLM
-      # at http://host.docker.internal:8080). Harmless in prod when unused.
-      - "host.docker.internal:host-gateway"
-    volumes:
-      - ${DATA_DIR:-./data}:/app/data
-      - ${ADAPTERS_DIR:-./models}:/adapters
-      - ${HF_CACHE_DIR:-${HOME}/.cache/huggingface}:/hf
-    # Default args. Override with `make run ARGS="--workers 4 --batch-name X"`.
-    command: ["--workers", "2"]
-
-  # -------------------------------------------------------------------------
-  # Server — long-lived HTTP job API (FastAPI + uvicorn).
-  # Same image as `app`, different command. Models load once on the first
-  # job and stay warm for subsequent requests.
-  # -------------------------------------------------------------------------
-  server:
-    image: ${IMAGE:-cc-pipeline:cpu}
+  # =========================================================================
+  # HTTP server (long-lived job API). `up` target.
+  # =========================================================================
+  server:                                   # profile: cpu
+    <<: *svc-common
+    profiles: ["cpu"]
+    image: ${IMAGE_CPU:-cc-pipeline:cpu}
     restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-    env_file:
-      - .env
     environment:
-      STORAGE_ENABLE: "1"
-      DATABASE_URL: postgresql://${POSTGRES_USER:-cc_pipeline}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-call_center}
+      <<: *base-env
       SERVER_HOST: "0.0.0.0"
       SERVER_PORT: "8000"
       SERVER_WORKERS: "${SERVER_WORKERS:-1}"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    volumes:
-      - ${DATA_DIR:-./data}:/app/data
-      - ${ADAPTERS_DIR:-./models}:/adapters
-      - ${HF_CACHE_DIR:-${HOME}/.cache/huggingface}:/hf
-    ports:
-      # Exposed on the host loopback by default. Comment out or change to
-      # `${SERVER_HOST_PORT:-8000}:8000` to bind externally.
-      - "127.0.0.1:${SERVER_HOST_PORT:-8000}:8000"
-    # Override the image's batch ENTRYPOINT to run the server module.
     entrypoint: ["python", "-m", "src.server"]
     command: []
+    ports:
+      - "127.0.0.1:${SERVER_HOST_PORT:-8000}:8000"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=2).status==200 else 1)"]
       interval: 10s
       timeout: 5s
       retries: 12
       start_period: 30s
+
+  server-gpu:                               # profile: gpu
+    <<: *svc-common
+    profiles: ["gpu"]
+    image: ${IMAGE_GPU:-cc-pipeline:gpu}
+    restart: unless-stopped
+    deploy: *gpu-deploy
+    environment:
+      <<: *base-env
+      SERVER_HOST: "0.0.0.0"
+      SERVER_PORT: "8000"
+      SERVER_WORKERS: "${SERVER_WORKERS:-1}"
+    entrypoint: ["python", "-m", "src.server"]
+    command: []
+    ports:
+      - "127.0.0.1:${SERVER_HOST_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=2).status==200 else 1)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # =========================================================================
+  # One-shot batch runner. `run` target (not started by `up`).
+  # =========================================================================
+  app:                                      # profile: cpu-batch
+    <<: *svc-common
+    profiles: ["cpu-batch"]
+    image: ${IMAGE_CPU:-cc-pipeline:cpu}
+    environment:
+      <<: *base-env
+    command: ["--workers", "2"]
+
+  app-gpu:                                  # profile: gpu-batch
+    <<: *svc-common
+    profiles: ["gpu-batch"]
+    image: ${IMAGE_GPU:-cc-pipeline:gpu}
+    deploy: *gpu-deploy
+    environment:
+      <<: *base-env
+    command: ["--workers", "2"]
 
 volumes:
   pgdata:

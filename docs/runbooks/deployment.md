@@ -39,11 +39,104 @@ make clean             # stop + wipe DB volume
 make push REGISTRY=registry.internal/team TAG=cpu-$(git rev-parse --short HEAD)
 
 # Long-running HTTP API (alternative to one-shot batches)
-make serve             # start db + server (detached). Listens on 127.0.0.1:8000
+make serve             # start db + server (CPU). Listens on 127.0.0.1:8000
+make serve TORCH=gpu   # same, on GPU (gpu image + NVIDIA device reservation)
 make serve-logs        # tail server logs
 make serve-shell       # bash inside the server container
 make serve-down        # stop the server (DB stays up)
 make server-status     # health + recent jobs
+
+# Qwen / vLLM backing service (separate compose.vllm.yaml)
+make vllm-gpu          # start Qwen vLLM on GPU (dev)
+make vllm-cpu          # start Qwen vLLM on CPU (prod; build vllm-cpu:local first)
+make vllm-down         # stop vLLM
+```
+
+## CPU ↔ GPU switching (Compose profiles)
+
+There is ONE `compose.yaml` and ONE `Dockerfile`. CPU vs GPU is a **Compose
+profile**, not a separate file:
+
+```bash
+docker compose --profile cpu up -d        # API server on CPU  (== make serve)
+docker compose --profile gpu up -d        # API server on GPU  (== make serve TORCH=gpu)
+
+docker compose --profile cpu-batch run --rm app     --limit 3   # batch on CPU
+docker compose --profile gpu-batch run --rm app-gpu --limit 3   # batch on GPU
+```
+
+Why a profile and not "just rebuild the image": switching CPU↔GPU is **two**
+concerns —
+
+1. **Build** — which torch wheel is installed (`make build` vs `make build
+   TORCH=gpu`). That's the image.
+2. **Runtime** — whether the container is *given* the GPU. That's the
+   `deploy.resources.reservations.devices` block, which only exists on the
+   `*-gpu` services (`server-gpu`, `app-gpu`). No Dockerfile change can grant
+   GPU access; it must be declared at runtime.
+
+To revert GPU→CPU: use `--profile cpu` again (or `make serve`). The GPU
+device reservation lives only on the `*-gpu` services, so the CPU path is
+unaffected and works on hosts without a GPU.
+
+**Host prerequisite for the GPU profile:** NVIDIA driver + NVIDIA Container
+Toolkit. Verify with:
+```bash
+docker run --rm --gpus all nvidia/cuda:13.0.1-base-ubuntu24.04 nvidia-smi
+```
+
+## Qwen / vLLM (`compose.vllm.yaml`)
+
+vLLM is a **separate backing service** — its own file, image, and lifecycle.
+The pipeline only needs `VLLM_BASE_URL` pointed at it; nothing in the app
+changes between CPU and GPU vLLM.
+
+```bash
+make vllm-gpu          # GPU (dev): vllm/vllm-openai image + NVIDIA device
+make vllm-cpu          # CPU (prod): requires a locally-built vllm-cpu:local
+```
+
+Both publish the OpenAI API on `127.0.0.1:8080`, matching the default
+`VLLM_BASE_URL=http://host.docker.internal:8080/v1`.
+
+> **CPU caveat (production):** vLLM on CPU is much slower than GPU, and Qwen3
+> reasoning mode emits long chains-of-thought before the answer — expect
+> seconds-to-minutes per call (and the pipeline makes two LLM calls per file:
+> classification + sentiment). For latency-sensitive CPU deployments prefer a
+> GGUF engine (llama.cpp / Ollama) and/or disable thinking mode. The app is
+> unaffected either way — only `VLLM_BASE_URL` changes.
+
+### Build the CPU vLLM image (one-time)
+
+There is no official prebuilt CPU image; build it from the vLLM repo:
+```bash
+git clone https://github.com/vllm-project/vllm.git
+cd vllm && docker build -f docker/Dockerfile.cpu -t vllm-cpu:local .
+```
+
+### Run Qwen offline (no internet)
+
+1. **On a machine with internet**, download the model into a local dir:
+   ```bash
+   pip install -U "huggingface_hub[cli]"
+   huggingface-cli download Qwen/Qwen3-4B --local-dir ./models/Qwen3-4B
+   ```
+2. Copy `./models` to the target host (same relative path, or set
+   `MODELS_DIR` to wherever it lands).
+3. In `.env` set:
+   ```bash
+   MODELS_DIR=./models
+   VLLM_MODEL=/models/Qwen3-4B      # local PATH, not the repo id
+   HF_HUB_OFFLINE=1
+   TRANSFORMERS_OFFLINE=1
+   ```
+4. Start it: `make vllm-gpu` (dev) or `make vllm-cpu` (prod). With
+   `VLLM_MODEL` pointing at the mounted local dir and the offline flags set,
+   vLLM loads from disk and makes no network calls.
+
+Validate it's serving:
+```bash
+curl http://127.0.0.1:8080/v1/models
 ```
 
 ## Long-running server (`make serve`)
@@ -92,8 +185,17 @@ produces the same artifacts as the batch runner:
 - A row in `call_results` (when storage is enabled), grouped under one
   `batch_id` per server lifetime (notes = `server-session-<timestamp>`).
 
-The job record (`GET /jobs/{id}`) carries a small summary and the path to
-the JSON file; query the DB or read the JSON for the full result.
+**The API `job_id` IS the database `call_id`.** The server passes the
+`job_id` straight into the pipeline as the `call_id`, so to find a job's
+durable row:
+
+```sql
+SELECT * FROM call_results WHERE call_id = '<job_id>';
+```
+
+The job record (`GET /jobs/{id}`) also carries a small summary and the path
+to the JSON file. (Note: the in-memory job registry is lost on a server
+restart, but the `call_results` row keyed by `job_id`/`call_id` is durable.)
 
 ### Configuration
 
