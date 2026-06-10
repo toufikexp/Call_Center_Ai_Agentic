@@ -32,6 +32,12 @@ x-base-env: &base-env
   DATABASE_URL: postgresql://${POSTGRES_USER:-cc_pipeline}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-call_center}
 
 x-svc-common: &svc-common
+  # Run as the host's app user so files written to bind mounts (results,
+  # logs, uploads) are owned by that account, not the image's baked uid.
+  # Dev: leave APP_UID/APP_GID unset → defaults to 1000 (the image's `app`
+  # user), behaviour unchanged. Prod: set APP_UID/APP_GID in .env to the
+  # service account (e.g. `id -u dsapp` / `id -g dsapp`).
+  user: "${APP_UID:-1000}:${APP_GID:-1000}"
   depends_on:
     db:
       condition: service_healthy
