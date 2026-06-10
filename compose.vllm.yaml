@@ -76,10 +76,19 @@ services:
       - "${VLLM_MAX_MODEL_LEN:-8192}"
 
   # =========================================================================
-  # CPU vLLM — prod. NOTE: there is no official prebuilt CPU image. Build it
-  # once from the vLLM repo, then this service runs it:
-  #   git clone https://github.com/vllm-project/vllm.git
-  #   cd vllm && docker build -f docker/Dockerfile.cpu -t vllm-cpu:local .
+  # CPU vLLM — prod. Two image options (set VLLM_CPU_IMAGE in .env):
+  #
+  #   1. Prebuilt community image (validated: vLLM 0.20.1, api_server
+  #      entrypoint — same arg style as the GPU image):
+  #        VLLM_CPU_IMAGE=openeuler/vllm-cpu:latest
+  #      For prod, pin by digest so 'latest' can't drift:
+  #        docker inspect --format '{{index .RepoDigests 0}}' openeuler/vllm-cpu:latest
+  #
+  #   2. Self-built from vLLM source (full supply-chain control):
+  #        git clone https://github.com/vllm-project/vllm.git && cd vllm
+  #        git checkout <release tag>        # never build main
+  #        docker build -f docker/Dockerfile.cpu -t vllm-cpu:<tag> \
+  #            --build-arg max_jobs=16 --shm-size=4g .
   #
   # WARNING: vLLM on CPU is much slower than on GPU, and Qwen3 reasoning mode
   # emits long chains-of-thought before the answer — expect many seconds to
