@@ -103,7 +103,8 @@ services:
       - "Qwen/Qwen3-4B"
       - "--reasoning-parser"
       - "qwen3"
-      - "--device"
-      - "cpu"
+      # Device selection is implicit on the CPU image (no --device flag —
+      # removed in recent vLLM). VLLM_CPU_KVCACHE_SPACE / OMP_NUM_THREADS
+      # above already steer the CPU runtime.
       - "--max-model-len"
       - "${VLLM_MAX_MODEL_LEN:-8192}"
