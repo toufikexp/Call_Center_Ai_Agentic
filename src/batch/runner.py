@@ -22,7 +22,7 @@ import signal
 import sys
 import threading
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import CancelledError, ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -341,7 +341,17 @@ class BatchRunner:
 
                 for fut in as_completed(futures):
                     audio_path = futures[fut]
-                    call_id, status = fut.result()
+                    # On Ctrl-C we cancel not-yet-started futures below;
+                    # as_completed still yields them, and result() on a
+                    # cancelled future raises CancelledError (a BaseException
+                    # subclass that would otherwise escape and crash the run).
+                    # Skip those cleanly — they were never processed.
+                    if fut.cancelled():
+                        continue
+                    try:
+                        call_id, status = fut.result()
+                    except CancelledError:
+                        continue
                     counts[status] = counts.get(status, 0) + 1
                     # Move the file out of the input dir if applicable.
                     self._archive_one(audio_path, status)
