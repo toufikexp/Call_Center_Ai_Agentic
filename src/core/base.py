@@ -4,6 +4,7 @@ Base classes for services.
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 from dataclasses import dataclass
+import threading
 import time
 import logging
 
@@ -25,6 +26,10 @@ class BaseService(ABC):
         self.name = name
         self.logger = logger or self._create_logger()
         self._initialized = False
+        # Guards one-time model loading so concurrent callers (e.g. multiple
+        # batch workers sharing one service) don't run initialize() at the
+        # same time. The first caller loads; the rest wait, then reuse it.
+        self._init_lock = threading.Lock()
     
     def _create_logger(self) -> logging.Logger:
         """Create logger for this service."""
@@ -90,8 +95,17 @@ class BaseService(ABC):
             )
     
     def ensure_initialized(self) -> None:
-        """Ensure service is initialized."""
-        if not self._initialized:
-            self.initialize()
-            self._initialized = True
+        """Ensure the service is initialized exactly once, thread-safely.
+
+        Double-checked locking: the common already-initialized path takes no
+        lock (zero overhead per process() call); the first concurrent callers
+        serialize on `_init_lock` so initialize() runs once and a second
+        worker waits for the load instead of racing a half-built model.
+        """
+        if self._initialized:
+            return
+        with self._init_lock:
+            if not self._initialized:
+                self.initialize()
+                self._initialized = True
 
