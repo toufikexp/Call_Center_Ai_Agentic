@@ -462,7 +462,14 @@ class Settings(BaseModel):
             )
             if classification_schema
             else ClassificationSettings(),
-            pipeline=PipelineSettings(),
+            pipeline=PipelineSettings(
+                confidence_threshold=_float_env(
+                    "CONFIDENCE_THRESHOLD", PipelineSettings().confidence_threshold
+                ),
+                refinement_threshold=_float_env(
+                    "REFINEMENT_THRESHOLD", PipelineSettings().refinement_threshold
+                ),
+            ),
             storage=StorageSettings(
                 enable=_bool_env("STORAGE_ENABLE", False),
                 database_url=os.getenv("DATABASE_URL", ""),
