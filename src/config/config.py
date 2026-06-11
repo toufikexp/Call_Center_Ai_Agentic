@@ -194,6 +194,16 @@ class VLLMSettings(BaseModel):
     api_key: str = "none"
     temperature: float = 0.1
     timeout_seconds: int = 30
+    # Upper bound for the completion. Classification/sentiment outputs are
+    # small JSON objects; bounding prevents a reasoning-mode model from
+    # burning minutes of CPU generating an unbounded chain-of-thought.
+    max_tokens: int = 1024
+    # Qwen3 "thinking" mode spends most of the token budget on internal
+    # reasoning before the answer — pure waste for structured JSON tasks,
+    # and when the budget runs out mid-think the API returns content=None.
+    # True sends chat_template_kwargs={"enable_thinking": false}; harmless
+    # for chat templates that don't define the variable.
+    disable_thinking: bool = True
 
 
 class ClassificationSettings(BaseModel):
@@ -335,6 +345,15 @@ class Settings(BaseModel):
             )
         except ValueError:
             vllm_temperature = vllm_defaults.temperature
+        try:
+            vllm_max_tokens = int(
+                os.getenv("VLLM_MAX_TOKENS", str(vllm_defaults.max_tokens))
+            )
+        except ValueError:
+            vllm_max_tokens = vllm_defaults.max_tokens
+        vllm_disable_thinking = os.getenv(
+            "VLLM_DISABLE_THINKING", "1" if vllm_defaults.disable_thinking else "0"
+        ).strip().lower() in ("1", "true", "yes", "on")
 
         # Classification schema from JSON
         classification_schema_path = os.getenv("CLASSIFICATION_SCHEMA_PATH")
@@ -456,6 +475,8 @@ class Settings(BaseModel):
                 model_name=vllm_model_name,
                 api_key=vllm_api_key,
                 temperature=vllm_temperature,
+                max_tokens=vllm_max_tokens,
+                disable_thinking=vllm_disable_thinking,
             ),
             classification=ClassificationSettings(
                 **classification_schema

@@ -2,6 +2,7 @@
 Sentiment analysis service using local vLLM API (Qwen3-4B).
 """
 import json
+import re
 from typing import Optional
 from openai import OpenAI
 
@@ -111,21 +112,43 @@ JSON Output:"""
                 # Build sentiment analysis prompt
                 prompt = self._build_sentiment_prompt(transcript)
                 
-                # Call vLLM API using OpenAI-compatible interface
-                response = self._client.chat.completions.create(
+                # Call vLLM API using OpenAI-compatible interface.
+                # max_tokens bounds the completion (the JSON output is tiny);
+                # disable_thinking turns off Qwen3 reasoning mode, which
+                # otherwise burns the whole budget on chain-of-thought and
+                # can return content=None.
+                create_kwargs = dict(
                     model=self.vllm_settings.model_name,  # Must match the model name in Docker
                     messages=[
                         {"role": "system", "content": "You are a helpful assistant that outputs only JSON."},
                         {"role": "user", "content": prompt}
                     ],
-                    temperature=self.vllm_settings.temperature  # Lower temperature for better accuracy
+                    temperature=self.vllm_settings.temperature,  # Lower temperature for better accuracy
+                    max_tokens=self.vllm_settings.max_tokens,
                 )
-                
-                # Extract response text
+                if self.vllm_settings.disable_thinking:
+                    create_kwargs["extra_body"] = {
+                        "chat_template_kwargs": {"enable_thinking": False}
+                    }
+                response = self._client.chat.completions.create(**create_kwargs)
+
+                # Extract response text. With a reasoning parser (e.g. Qwen3),
+                # content can be None when the model spent the whole token
+                # budget thinking and never emitted a final answer.
                 raw_text = response.choices[0].message.content
-                
-                # Clean and parse JSON response
-                clean_json = raw_text.replace("```json", "").replace("```", "").strip()
+                if raw_text is None:
+                    finish_reason = response.choices[0].finish_reason
+                    raise RuntimeError(
+                        "vLLM returned no final content (reasoning-only response, "
+                        f"finish_reason={finish_reason}). The model used its whole "
+                        "token budget thinking. Increase VLLM_MAX_TOKENS or keep "
+                        "VLLM_DISABLE_THINKING=1."
+                    )
+
+                # Clean and parse JSON response. Strip any inline <think> block
+                # (present when thinking is on but no reasoning parser strips it).
+                clean_json = re.sub(r"<think>.*?</think>", "", raw_text, flags=re.DOTALL)
+                clean_json = clean_json.replace("```json", "").replace("```", "").strip()
                 data = json.loads(clean_json)
                 
                 # Extract sentiment results
