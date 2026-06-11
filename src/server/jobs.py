@@ -13,9 +13,11 @@ Design notes
   storage is enabled), so this module deliberately does NOT duplicate that.
   Job records here are *metadata*; the durable artifacts are the JSON file
   under `data/results/` and the `call_results` row.
-- The orchestrator's `start_batch`/`finish_batch` use a single field on the
-  pipeline instance, so we wrap the whole server lifetime in one batch
-  rather than per-job, keeping `_current_batch_id` race-free.
+- Each job runs as its own batch (file_count=1): _run() calls start_batch
+  before the pipeline and finish_batch after, so every `batch_runs` row gets
+  a `finished_at` when the job completes — matching the one-shot batch
+  runner. The batch_id is passed explicitly into `run(batch_id=...)` so
+  concurrent workers don't race on the pipeline's shared `_current_batch_id`.
 """
 from __future__ import annotations
 
@@ -98,15 +100,14 @@ class JobStore:
 
         self._settings = get_settings()
         self._pipeline = CallAnalysisPipeline(self._settings)
-        # One batch per server lifetime — all jobs grouped under it for DB
-        # analytics. Safe because batch state on the pipeline is a single
-        # field and we set it exactly once here on the main thread.
-        notes = f"server-session-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-        self._batch_id = self._pipeline.start_batch(notes=notes)
+        # Each job runs as its OWN batch (file_count=1), opened and finished
+        # inside _run(). This mirrors the one-shot batch runner — every
+        # batch_runs row gets a finished_at when its job completes — instead
+        # of one ever-open server-lifetime batch that was only stamped at
+        # shutdown.
         logger.info(
-            "Job store ready (workers=%d, batch_id=%s, output_dir=%s)",
+            "Job store ready (workers=%d, output_dir=%s)",
             workers,
-            self._batch_id or "<storage-disabled>",
             self._settings.pipeline.output_dir,
         )
 
@@ -115,10 +116,7 @@ class JobStore:
     # ------------------------------------------------------------------
     def shutdown(self, wait: bool = True) -> None:
         logger.info("Shutting down job store (wait=%s)", wait)
-        try:
-            self._pipeline.finish_batch()
-        except Exception as e:  # pragma: no cover — defensive
-            logger.warning("finish_batch on shutdown failed: %s", e)
+        # No server-lifetime batch to finish — batches are per-job now.
         self._executor.shutdown(wait=wait, cancel_futures=not wait)
 
     # ------------------------------------------------------------------
@@ -180,12 +178,17 @@ class JobStore:
             audio_path = rec.audio_path
 
         t0 = time.time()
+        # One batch per job (file_count=1), finished in the `finally` below so
+        # batch_runs.finished_at is always stamped — same lifecycle as the
+        # one-shot batch runner. The batch_id is passed explicitly into run()
+        # so concurrent workers don't race on the shared _current_batch_id.
+        batch_id = self._pipeline.start_batch(file_count=1, notes=f"server-job:{job_id}")
         try:
             # Pass the API job_id straight through as the pipeline call_id so
             # the value the client polls on IS the primary key of the durable
             # row in `calls` / `call_results`. One id, traceable end to end —
             # no separate job_id↔call_id mapping to keep.
-            state = self._pipeline.run(audio_path, call_id=job_id)
+            state = self._pipeline.run(audio_path, call_id=job_id, batch_id=batch_id)
             result = state["result"]
             status_val = result.status.value
             mapped = _STATUS_MAP.get(status_val, JobStatus.ERROR)
@@ -223,6 +226,12 @@ class JobStore:
         except Exception as e:  # pragma: no cover — defensive
             logger.exception("Job %s failed: %s", job_id, e)
             self._mark_error(job_id, f"{type(e).__name__}: {e}")
+        finally:
+            # Stamp batch_runs.finished_at for this job's batch, always.
+            try:
+                self._pipeline.finish_batch(batch_id)
+            except Exception as e:  # pragma: no cover — defensive
+                logger.warning("finish_batch failed for job %s: %s", job_id, e)
 
     def _mark_error(self, job_id: str, message: str) -> None:
         with self._lock:

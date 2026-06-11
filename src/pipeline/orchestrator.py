@@ -71,13 +71,21 @@ class CallAnalysisPipeline:
         self.logger.info(f"📦 Batch started: {batch_id}")
         return batch_id
 
-    def finish_batch(self) -> None:
-        """Stamp the current batch as finished and aggregate counts."""
-        if not self._results_store or not self._current_batch_id:
+    def finish_batch(self, batch_id: Optional[str] = None) -> None:
+        """Stamp a batch as finished and aggregate counts.
+
+        Pass an explicit `batch_id` to finish a specific batch (used by the
+        HTTP server, which runs one batch per job). With no argument it
+        finishes the current batch (used by the batch runner)."""
+        if not self._results_store:
             return
-        self._results_store.finish_batch(self._current_batch_id)
-        self.logger.info(f"📦 Batch finished: {self._current_batch_id}")
-        self._current_batch_id = None
+        bid = batch_id or self._current_batch_id
+        if not bid:
+            return
+        self._results_store.finish_batch(bid)
+        self.logger.info(f"📦 Batch finished: {bid}")
+        if bid == self._current_batch_id:
+            self._current_batch_id = None
     
     def _create_logger(self) -> logging.Logger:
         """Create logger for the pipeline."""
@@ -416,14 +424,24 @@ class CallAnalysisPipeline:
         
         return {"result": result}
     
-    def run(self, audio_path: str, call_id: Optional[str] = None) -> PipelineState:
+    def run(
+        self,
+        audio_path: str,
+        call_id: Optional[str] = None,
+        batch_id: Optional[str] = None,
+    ) -> PipelineState:
         """
         Run the complete pipeline.
-        
+
         Args:
             audio_path: Path to audio file
             call_id: Optional call identifier
-        
+            batch_id: Optional batch to record this attempt under. When None,
+                falls back to the pipeline's current batch (set by
+                start_batch). Passing it explicitly lets concurrent callers
+                (the HTTP server) record into their own per-job batch without
+                racing on the shared _current_batch_id field.
+
         Returns:
             Final pipeline state
         """
@@ -467,7 +485,7 @@ class CallAnalysisPipeline:
                 call_id=final_state["result"].call_id,
                 audio_path=audio_path,
                 result=final_state["result"],
-                batch_id=self._current_batch_id,
+                batch_id=batch_id if batch_id is not None else self._current_batch_id,
                 started_at=started_at,
                 finished_at=finished_at,
             )

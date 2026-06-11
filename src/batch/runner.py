@@ -29,7 +29,6 @@ from typing import Dict, List, Optional, Tuple
 
 from src.config.config import get_settings, set_settings
 from src.pipeline import CallAnalysisPipeline
-from src.utils.ids import make_call_id
 
 
 _LOGGERS_TO_CAPTURE = (
@@ -243,13 +242,12 @@ class BatchRunner:
         self, pipeline: CallAnalysisPipeline, audio_path: str
     ) -> Tuple[str, str]:
         """Process one file. Always returns (call_id, status); never raises."""
-        try:
-            call_id = make_call_id(audio_path)
-        except Exception as e:
-            self._logger.error(
-                f"Failed to compute call_id for {audio_path}: {e}"
-            )
-            return ("?", "ID_ERROR")
+        # Unified id scheme with the HTTP server: a random uuid hex. NOTE this
+        # makes the call_id non-deterministic, so the is_already_processed()
+        # resume/skip below can no longer match a prior run — re-running a
+        # folder reprocesses every file. (To restore content-based resume,
+        # switch back to make_call_id from src.utils.ids.)
+        call_id = uuid.uuid4().hex
 
         # Idempotency: only when storage is enabled
         store = getattr(pipeline, "_results_store", None)
