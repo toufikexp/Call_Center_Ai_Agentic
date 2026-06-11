@@ -303,8 +303,15 @@ class BatchRunner:
         # service does the heavy lifting and the result is cached.
         pipeline = CallAnalysisPipeline(settings)
 
+        # notes is never empty: --batch-name when given, otherwise a
+        # timestamped default — consistent with the server's
+        # "server-job:<id>" pattern so batch_runs.notes always identifies
+        # the origin of the row.
+        batch_notes = self.batch_name or (
+            "batch-run-" + datetime.now().strftime("%Y%m%dT%H%M%S")
+        )
         batch_id = pipeline.start_batch(
-            file_count=len(paths), notes=self.batch_name
+            file_count=len(paths), notes=batch_notes
         )
         if batch_id is None:
             # Storage disabled — synthesize a local id for the log file only.
